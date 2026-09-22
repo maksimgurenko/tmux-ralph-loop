@@ -1,6 +1,6 @@
 # tmux-ralph-loop
 
-A resumable ticket loop that runs interactive Codex agents in tmux.
+A resumable ticket loop for **Codex, Claude Code, OpenCode, and Pi**, running interactively in tmux.
 
 Developed specifically for [Matt Pocock’s skill workflow](https://github.com/mattpocock/skills):
 plan the work, produce a spec, break it into tickets, then let the loop drive
@@ -38,8 +38,8 @@ This version reads local ticket files; it does not fetch GitHub or Linear issues
 
 ## Quick start
 
-Requires **Python 3.9+**, **tmux**, **Git**, and an authenticated **Codex CLI** on
-your `PATH`. Uses only Python’s standard library; tested on Linux.
+Requires **Python 3.9+**, **tmux**, **Git**, and your chosen authenticated agent CLI
+on `PATH`. No extra Python packages; tested on Linux.
 
 ```sh
 git clone https://github.com/maksimgurenko/tmux-ralph-loop.git "$HOME/tmux-ralph-loop"
@@ -57,10 +57,29 @@ ralph start --prompt '$implement Choose one eligible unfinished ticket and imple
 tail -f .ralph/loop.log
 ```
 
-Run these commands from the target repository. Codex inherits your authentication
-and model settings. The runner invokes
-`codex --yolo` (approval prompts and sandbox disabled) and instructs the agent to
-commit completed ticket work on the current branch while preserving unrelated changes.
+Run these commands from the target repository. The agent inherits its own authentication
+and model settings and is instructed to commit completed ticket work on the current
+branch while preserving unrelated changes.
+
+## Choose an agent
+
+Codex is the default. Select another CLI with `--agent`:
+
+| Agent | Start command |
+| --- | --- |
+| [Codex](https://developers.openai.com/codex/cli/) | `ralph start --agent codex` |
+| [Claude Code](https://code.claude.com/docs/en/overview) | `ralph start --agent claude` |
+| [OpenCode](https://opencode.ai/docs/) | `ralph start --agent opencode` |
+| [Pi](https://pi.dev/docs/latest/quickstart) (0.87.0+) | `ralph start --agent pi` |
+
+Each uses its native interactive interface and completion hooks. The selected agent
+is remembered across restarts; active runs cannot switch agents. For Matt’s workflow
+across CLIs, add `--prompt 'Use the implement skill to implement one eligible ticket.'`
+with that skill installed for your chosen agent.
+
+The loop uses Codex’s `--yolo`, Claude’s `--dangerously-skip-permissions`, and
+OpenCode’s `--auto`; Pi uses its normal tool permissions. See
+[agent setup, permissions, and compatibility](docs/agents.md).
 
 ## Connect, stop, and resume
 
@@ -109,8 +128,9 @@ criteria. These checks validate reported completion, not independently prove cor
 ## Tests and license
 
 ```sh
-python3 -m unittest discover -s tests -p 'test_ralph.py' -v
+python3 -m unittest discover -s tests -v
 ```
 
 Run from this tool’s checkout. Integration tests use real tmux with simulated
-Codex; they do not make model API calls. [MIT licensed](LICENSE).
+agents; OpenCode/Pi adapter tests also need Node.js. No model API calls.
+[MIT licensed](LICENSE).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serial, resumable ticket runner using interactive Codex in tmux (stdlib only)."""
+"""Serial, resumable ticket runner using interactive coding agents in tmux."""
 import argparse
 import fcntl
 import hashlib
@@ -8,12 +8,14 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
 import uuid
 
 SCRIPT = Path(__file__).resolve()
+AGENTS = ("codex", "claude", "opencode", "pi")
 DEFAULT_PROMPT = """Follow the repository's instructions. Choose one eligible unfinished
 ticket, implement it, and run the relevant checks. Review your changes and record
 verification evidence in the ticket before reporting completion."""
@@ -107,6 +109,7 @@ def completion(run):
         event = read(path)
         inputs = event.get("input-messages", [])
         if (event.get("type") == "agent-turn-complete"
+                and event.get("agent", "codex") == meta.get("agent", "codex")
                 and event.get("cwd") == meta["repo"]
                 and event.get("thread-id") and event.get("turn-id")
                 and (event["thread-id"] == bound_thread
@@ -153,7 +156,7 @@ def completion(run):
     return result
 
 
-def prepare(repo, state, folder, attempts, timeout, instructions=DEFAULT_PROMPT):
+def prepare(repo, state, folder, attempts, timeout, instructions=DEFAULT_PROMPT, agent="codex"):
     found = tickets(folder)
     run = state / "runs" / ("run-" + uuid.uuid4().hex[:12])
     (run / "events").mkdir(parents=True)
@@ -185,7 +188,10 @@ The runner updates ticket Status. After reporting, finish your turn.
                         criteria=[text for _, text in CHECK.findall(t["body"])])
                 for n, t in found.items()}
     meta = dict(repo=str(repo), tickets=snapshot, prompt=prompt, attempts=dict(attempts),
-                session=run.name, deadline=time.time() + timeout)
+                session=run.name, deadline=time.time() + timeout, agent=agent,
+                notify=[sys.executable, str(SCRIPT), "_notify", str(run)])
+    if agent == "claude":
+        meta["runtime_session_id"] = str(uuid.uuid4())
     write(run / "run.json", meta)
     return run, meta
 
@@ -219,7 +225,7 @@ def run_loop(args, state):
                     raise ValueError(f"Session lost or deadline reached. No relaunch. Inspect {run}; retry explicitly after stopping any surviving work.")
                 dead = tmux(args.repo, "display-message", "-p", "-t", meta["session"], "#{pane_dead}").stdout.strip()
                 if dead == "1":
-                    raise ValueError(f"Codex exited without completion evidence. Inspect {run}; no automatic relaunch.")
+                    raise ValueError(f"Agent exited without completion evidence. Inspect {run}; no automatic relaunch.")
                 time.sleep(2)
             # Save outcome before effects, so restart repeats only idempotent finalization.
             write(run / "outcome.json", result)
@@ -255,19 +261,96 @@ def run_loop(args, state):
         if all(t["status"] == "done" for t in found.values()):
             print("All tickets done.")
             return 0
-        run, meta = prepare(args.repo, state, args.tickets, data["attempts"], args.timeout, args.prompt)
+        agent = getattr(args, "agent", "codex")
+        check_agent(agent)
+        run, meta = prepare(args.repo, state, args.tickets, data["attempts"], args.timeout, args.prompt, agent)
+        data["agent"] = agent
         data["active"] = str(run)
         write(checkpoint, data)  # A crash here never causes automatic redispatch.
         launch(args.repo, run, meta)
+
+
+def notify(run, event):
+    event["received_ns"] = time.time_ns()
+    write(run / "events" / (uuid.uuid4().hex + ".json"), event)
+
+
+def claude_hook(run, event):
+    """Translate main-session hooks; subagent hooks can never bind this run."""
+    write(run / "native-events" / (uuid.uuid4().hex + ".json"), event)
+    meta = read(run / "run.json")
+    if (meta.get("agent") != "claude" or event.get("session_id") != meta["runtime_session_id"]
+            or event.get("cwd") != meta["repo"] or event.get("agent_id")):
+        return
+    current = run / "claude-turn.json"
+    if event.get("hook_event_name") == "UserPromptSubmit":
+        previous = read(current) if current.exists() else None
+        if not previous and event.get("prompt") != meta["prompt"]:
+            return
+        write(current, {"id": uuid.uuid4().hex, "prompt": event.get("prompt"),
+                        "first_prompt": previous["first_prompt"] if previous else event["prompt"]})
+    elif event.get("hook_event_name") == "Stop" and current.exists():
+        turn = read(current)
+        message = event.get("last_assistant_message")
+        if not isinstance(message, str):
+            return
+        # Stop hooks can cause additional responses within one submitted prompt.
+        response_id = hashlib.sha256(message.encode()).hexdigest()
+        notify(run, {"type": "agent-turn-complete", "agent": "claude", "cwd": event["cwd"],
+                     "thread-id": event["session_id"], "turn-id": turn["id"] + ":" + response_id,
+                     "input-messages": [turn["first_prompt"], turn["prompt"]],
+                     "last-assistant-message": message})
+
+
+def agent_command(run, meta):
+    """Configure only this process; never edit the user's agent configuration."""
+    agent = meta.get("agent", "codex")
+    env = dict(os.environ, TMUX_RALPH_RUN=str(run))
+    if agent == "codex":
+        callback = [sys.executable, str(SCRIPT), "_notify", str(run)]
+        command = ["codex", "--yolo", "--no-alt-screen", "-C", meta["repo"],
+                   "-c", "notify=" + json.dumps(callback), "--", meta["prompt"]]
+    elif agent == "claude":
+        hook = {"hooks": [{"type": "command", "command": shlex.join(
+            [sys.executable, str(SCRIPT), "_claude_hook", str(run)])}]}
+        settings = run / "claude-settings.json"
+        write(settings, {"hooks": {"UserPromptSubmit": [hook], "Stop": [hook]}})
+        command = ["claude", "--dangerously-skip-permissions", "--session-id", meta["runtime_session_id"],
+                   "--settings", str(settings), "--", meta["prompt"]]
+    elif agent == "opencode":
+        config = json.loads(env.get("OPENCODE_CONFIG_CONTENT", "{}"))
+        plugin = (SCRIPT.parent / "adapters/opencode.mjs").as_uri()
+        config["plugin"] = [*config.get("plugin", []), plugin]
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
+        command = ["opencode", meta["repo"], "--auto", "--prompt", meta["prompt"]]
+    elif agent == "pi":
+        command = ["pi", "--session", str(run / "pi-session.jsonl"),
+                   "--extension", str(SCRIPT.parent / "adapters/pi.mjs"), "--", meta["prompt"]]
+    else:
+        raise ValueError(f"Unsupported agent: {agent}")
+    return command, env
+
+
+def check_agent(agent):
+    if not shutil.which(agent):
+        raise ValueError(f"Agent executable not found on PATH: {agent}")
+    if agent == "pi":
+        try:
+            result = subprocess.run(["pi", "--version"], text=True, capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired as error:
+            raise ValueError("Timed out checking Pi's version") from error
+        version = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", result.stdout)
+        if result.returncode or not version or tuple(map(int, version.groups())) < (0, 87, 0):
+            raise ValueError("Pi 0.87.0+ is required for settled-turn notifications; update @earendil-works/pi-coding-agent")
 
 
 def internal(argv):
     command, directory, *rest = argv
     run = Path(directory).resolve()
     if command == "_notify":
-        event = json.loads(rest[-1])
-        event["received_ns"] = time.time_ns()
-        write(run / "events" / (uuid.uuid4().hex + ".json"), event)
+        notify(run, json.loads(rest[-1]) if rest else json.load(sys.stdin))
+    elif command == "_claude_hook":
+        claude_hook(run, json.load(sys.stdin))
     elif command == "_report":
         outcome, number, summary = rest
         if outcome not in {"done", "retry", "blocked"} or not summary.strip():
@@ -287,9 +370,9 @@ def internal(argv):
         while not (run / "go").exists():
             time.sleep(0.1)
         meta = read(run / "run.json")
-        notify = [sys.executable, str(SCRIPT), "_notify", str(run)]
-        os.execvp("codex", ["codex", "--yolo", "--no-alt-screen", "-C", meta["repo"],
-                           "-c", "notify=" + json.dumps(notify), "--", meta["prompt"]])
+        command, env = agent_command(run, meta)
+        os.chdir(meta["repo"])
+        os.execvpe(command[0], command, env)
     else:
         raise ValueError(f"Unknown internal command: {command}")
     return 0
@@ -301,6 +384,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["start", "run", "status", "stop", "retry"])
     parser.add_argument("ticket", nargs="?", help="Ticket number for retry")
+    parser.add_argument("--agent", choices=AGENTS, help="Interactive CLI (default: recorded agent, otherwise codex)")
     parser.add_argument("--repo", type=Path, default=Path.cwd(), help="Target repository (default: current directory)")
     parser.add_argument("--tickets", type=Path, help="Ticket directory (default: <repo>/issues)")
     parser.add_argument("--state", type=Path, help="Runtime directory (default: <repo>/.ralph)")
@@ -330,14 +414,18 @@ def main():
         for number, ticket in found.items():
             print(f"{number}  {ticket['status']:15} {'runnable' if number in ready else ''}  {ticket['path'].stem[3:]}")
         if (state / "state.json").exists():
-            active = read(state / "state.json")["active"]
+            checkpoint = read(state / "state.json")
+            active = checkpoint["active"]
             print("Active:", active or "none")
             if active:
                 meta = read(Path(active) / "run.json")
+                print("Agent:", meta.get("agent", "codex"))
                 print("Ticket selection: delegated to the agent; recorded in its result")
                 print("Worker attach:", f"tmux -L {socket(args.repo)} attach -t {meta['session']}")
                 if (Path(active) / "progress.json").exists():
                     print("Waiting for input:", read(Path(active) / "progress.json")["summary"])
+            else:
+                print("Agent:", checkpoint.get("agent", "codex"))
         print("Runner attach:", f"tmux -L {socket(args.repo)} attach -t loop")
         print("Logs:", state)
         return 0
@@ -373,6 +461,15 @@ def main():
             write(checkpoint, data)
             print(f"Ticket {number} requeued. Use start to resume.")
             return 0
+        data = read(state / "state.json") if (state / "state.json").exists() else {}
+        active_agent = read(Path(data["active"]) / "run.json").get("agent", "codex") if data.get("active") else None
+        if active_agent and args.agent and args.agent != active_agent:
+            raise ValueError(f"Active run uses {active_agent}; resume it before switching agents")
+        args.agent = args.agent or active_agent or data.get("agent", "codex")
+        if args.agent not in AGENTS:
+            raise ValueError(f"Unsupported recorded agent: {args.agent}")
+        if not data.get("active"):
+            check_agent(args.agent)
         if args.command == "start":
             reuse = exists(args.repo, "loop")
             if reuse:
@@ -384,7 +481,7 @@ def main():
             command = shlex.join([sys.executable, str(SCRIPT), "run", "--repo", str(args.repo),
                                  "--tickets", str(args.tickets), "--state", str(state),
                                  "--max-attempts", str(args.max_attempts), "--timeout", str(args.timeout),
-                                 "--prompt=" + args.prompt])
+                                 "--agent", args.agent, "--prompt=" + args.prompt])
             shell = "sleep 1; " + command + " >> " + shlex.quote(str(state / "loop.log")) + " 2>&1"
             if reuse:
                 tmux(args.repo, "respawn-pane", "-k", "-t", "loop", "-c", str(args.repo), shell)

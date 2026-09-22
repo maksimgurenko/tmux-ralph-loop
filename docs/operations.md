@@ -7,6 +7,7 @@ examples below assume the `ralph` shell function in the README and default state
 
 | Option | Default |
 | --- | --- |
+| `--agent` | Recorded agent, or `codex` for a new state directory |
 | `--repo` | Current directory |
 | `--tickets` | `<repo>/issues` |
 | `--state` | `<repo>/.ralph` |
@@ -16,8 +17,13 @@ examples below assume the `ralph` shell function in the README and default state
 Explicit relative paths resolve from the directory where you invoke the command.
 Provide either `--prompt` or `--prompt-file` to override task instructions. New
 instructions apply to future attempts, while a resumed conversation retains its
-original prompt. The runner overrides Codex's notification hook for each invocation
-without changing your global config.
+original prompt. Agent hooks and extensions are configured for each invocation
+without changing your global config; see [agent compatibility](agents.md).
+
+The chosen agent is recorded with each run and in the checkpoint. Restarting without
+`--agent` keeps it. A different `--agent` is rejected while a run is active. After
+finishing or explicitly abandoning/requeueing that run, you can select another CLI.
+Older checkpoints without an agent field are treated as Codex runs.
 
 `start` runs the watcher in a detached tmux session and clears a graceful-stop
 request. `run` watches in the foreground; remove `.ralph/STOP` to resume dispatch
@@ -35,7 +41,7 @@ least one acceptance checkbox. A ticket marked done with unchecked criteria is r
 3. Detach with **Ctrl-b, d**. If the watcher was stopped, restart it with `ralph start`
    and your usual prompt override for future attempts.
 
-The watcher binds completion to the run’s original input, working directory,
+The watcher binds completion to the run’s agent, original input, working directory,
 conversation, and unique report marker. Unrelated notifications, reviewer replies,
 and reused markers cannot advance the loop. A report alone is insufficient: its
 matching turn-end event must arrive. If an agent forgets its marker, attach and
@@ -71,7 +77,7 @@ The default `.ralph/` directory contains:
 - `loop.log`: detached watcher output.
 - `state.json`: active run and attempt counts.
 - `runs/<run-id>/`: assembled prompt, ticket snapshot, runtime events, immutable
-  per-turn reports, terminal output, and progress/outcome records.
+  per-turn reports, terminal output, agent-specific hook/session files, and progress/outcome records.
 - `STOP`: graceful stop request, cleared by `start`.
 - `runner.lock`: repository-wide lock, used even with a custom `--state` directory.
 

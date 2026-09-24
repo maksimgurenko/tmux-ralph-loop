@@ -205,6 +205,29 @@ def launch(repo, run, meta):
     write(run / "go", "go\n")
 
 
+def submit_opencode_prompt(repo, run, meta):
+    """Work around V2's startup auto-submit race, without sending another prompt."""
+    if (meta.get("agent") != "opencode" or not (run / "opencode-ready").exists()
+            or (run / "opencode-input.json").exists() or (run / "opencode-submitted").exists()):
+        return
+    screen = tmux(repo, "capture-pane", "-p", "-t", meta["session"], check=False).stdout
+    # Only the initial home composer: the OpenCode logo and the tail of our
+    # injected prompt must both be visible. Never press keys in an active turn,
+    # a permission dialog, or an operator's follow-up composer.
+    if "█▀▀█" not in screen or "The runner updates ticket Status. After reporting, finish your turn." not in screen:
+        return
+    seen = run / "opencode-composer-seen"
+    if not seen.exists():
+        write(seen, {"time": time.time()})
+        return
+    if time.time() - read(seen)["time"] < 2:
+        return
+    # At most once even across watcher restarts; native prompt admission is
+    # recorded independently by the V2 plugin, not inferred from this keystroke.
+    write(run / "opencode-submitted", "Submitted the existing startup composer\n")
+    tmux(repo, "send-keys", "-t", meta["session"], "Enter")
+
+
 def run_loop(args, state):
     checkpoint = state / "state.json"
     data = read(checkpoint) if checkpoint.exists() else {"active": None, "attempts": {}}
@@ -214,6 +237,7 @@ def run_loop(args, state):
             meta = read(run / "run.json")
             print(f"Agent selecting work: tmux -L {socket(args.repo)} attach -t {meta['session']}", flush=True)
             while True:
+                submit_opencode_prompt(args.repo, run, meta)
                 result = completion(run)
                 if result:
                     break
@@ -319,10 +343,10 @@ def agent_command(run, meta):
                    "--settings", str(settings), "--", meta["prompt"]]
     elif agent == "opencode":
         config = json.loads(env.get("OPENCODE_CONFIG_CONTENT", "{}"))
-        plugin = (SCRIPT.parent / "adapters/opencode.mjs").as_uri()
-        config["plugin"] = [*config.get("plugin", []), plugin]
+        plugin = (SCRIPT.parent / "adapters/opencode").as_uri()
+        config["plugins"] = [*config.get("plugins", []), plugin]
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
-        command = ["opencode", meta["repo"], "--auto", "--prompt", meta["prompt"]]
+        command = ["opencode", meta["repo"], "--standalone", "--auto", "--prompt", meta["prompt"]]
     elif agent == "pi":
         command = ["pi", "--session", str(run / "pi-session.jsonl"),
                    "--extension", str(SCRIPT.parent / "adapters/pi.mjs"), "--", meta["prompt"]]
@@ -334,12 +358,16 @@ def agent_command(run, meta):
 def check_agent(agent):
     if not shutil.which(agent):
         raise ValueError(f"Agent executable not found on PATH: {agent}")
-    if agent == "pi":
+    if agent in {"pi", "opencode"}:
         try:
-            result = subprocess.run(["pi", "--version"], text=True, capture_output=True, timeout=10)
+            result = subprocess.run([agent, "--version"], text=True, capture_output=True, timeout=10)
         except subprocess.TimeoutExpired as error:
-            raise ValueError("Timed out checking Pi's version") from error
-        version = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", result.stdout)
+            raise ValueError(f"Timed out checking {agent}'s version") from error
+        version = re.search(r"\bv?(\d+)\.(\d+)\.(\d+)\b", result.stdout)
+        if agent == "opencode":
+            if result.returncode or not version or int(version[1]) != 2:
+                raise ValueError("OpenCode 2.x is required; V1 and other major versions are not supported")
+            return
         if result.returncode or not version or tuple(map(int, version.groups())) < (0, 87, 0):
             raise ValueError("Pi 0.87.0+ is required for settled-turn notifications; update @earendil-works/pi-coding-agent")
 

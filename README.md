@@ -69,7 +69,7 @@ Codex is the default. Select another CLI with `--agent`:
 | --- | --- |
 | [Codex](https://developers.openai.com/codex/cli/) | `ralph start --agent codex` |
 | [Claude Code](https://code.claude.com/docs/en/overview) | `ralph start --agent claude` |
-| [OpenCode](https://opencode.ai/docs/) | `ralph start --agent opencode` |
+| [OpenCode](https://opencode.ai/v2/docs/) (2.x only) | `ralph start --agent opencode` |
 | [Pi](https://pi.dev/docs/latest/quickstart) (0.87.0+) | `ralph start --agent pi` |
 
 Each uses its native interactive interface and completion hooks. The selected agent
@@ -133,4 +133,30 @@ python3 -m unittest discover -s tests -v
 
 Run from this tool’s checkout. Integration tests use real tmux with simulated
 agents; OpenCode/Pi adapter tests also need Node.js. No model API calls.
+
+To test your **installed, authenticated agents against real models**, opt in:
+
+```sh
+RALPH_LIVE_TESTS=1 python3 -m unittest discover -s tests -p test_live_agents.py -v
+# Or just one agent:
+RALPH_LIVE_TESTS=1 python3 tests/test_live_agents.py LiveAgentTests.test_pi -v
+```
+
+The live tests run all four CLIs sequentially using their existing configuration
+and authentication, consuming model usage. Each gets a fresh local Git repository
+with two dependent tasks from `tests/fixtures/live/issues`: write `hello` to a file,
+then calculate `1 + 2`. They verify exact file contents and committed outputs,
+live watcher/worker tmux sessions, fresh conversations, native completion callbacks,
+and both tickets reaching `done` without retries. They do not require installed skills.
+
+Each test has a dedicated tmux socket, cleaned up on success or failure. Repositories,
+prompts, logs, pane observations, and reports remain in `.ralph/live-tests/` for
+inspection, including text captures of the final panes. The harness accepts
+Claude's and Codex's recognized workspace-trust dialogs only for its generated fixture repo.
+Set `RALPH_LIVE_ARTIFACTS`
+to change the output directory or `RALPH_LIVE_TIMEOUT` to change the per-task timeout
+(default 300 seconds). Missing CLIs, other setup dialogs, authentication errors,
+blocked reports, and timeouts fail the opted-in tests rather than skip an agent.
+These tests are skipped by the ordinary test command.
+
 [MIT licensed](LICENSE).

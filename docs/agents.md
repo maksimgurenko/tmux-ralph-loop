@@ -33,19 +33,30 @@ See the [CLI reference](https://code.claude.com/docs/en/cli-reference) and
 
 ## OpenCode
 
-`--agent opencode` launches the TUI with `--auto`, which automatically approves
-permissions except those explicitly denied. A bundled plugin is appended through
+`--agent opencode` requires **OpenCode 2.x** and launches the TUI with
+`--standalone --auto`. Each worker has a private server that inherits its callback
+environment; the user's shared background server is not used. Auto mode approves
+permissions except those explicitly denied. A bundled V2 plugin directory is appended through
 the process's `OPENCODE_CONFIG_CONTENT`; existing inline settings and plugins are
 preserved. An existing value of that variable must be valid JSON.
 
-On an idle event, the plugin reads the native session and messages through the
-OpenCode SDK. It rejects child sessions, summaries, errors, incomplete/tool-call
-responses, and unrelated initial prompts. Only a completed final response carrying
-the run's fresh report marker can advance the loop.
+The plugin uses V2's `setup(ctx)` and event subscription API. It validates the
+session's actual directory, original prompt, successful execution, final assistant
+response, and durable idle marker. Child/forked sessions, interrupted or failed
+turns, incomplete/tool-call responses, and reads overtaken by new work cannot
+advance the loop. Completion still requires the run's fresh report marker.
+The plugin retains native evidence of the first delivered prompt so compaction
+and plugin reloads do not erase the identity check.
 
-See [CLI flags](https://opencode.ai/docs/cli/#tui),
-[configuration precedence](https://opencode.ai/docs/config/), and
-[plugins](https://opencode.ai/docs/plugins/).
+OpenCode 2.0.14 can leave `--prompt` in the home composer without submitting it.
+After the plugin is ready, the runner recognizes that initial screen and presses
+Enter once. Native prompt admission is recorded separately; the runner never
+resends the prompt or retries that keystroke after a watcher restart.
+
+V1 and other major versions are rejected before dispatch. See the
+[V2 CLI](https://opencode.ai/v2/docs/cli),
+[plugin configuration](https://opencode.ai/v2/docs/plugins/), and
+[V2 plugin API](https://opencode.ai/v2/docs/build/plugins).
 
 ## Pi
 
@@ -77,8 +88,7 @@ OpenCode/Pi callback failures are retained in `adapter-errors.log` inside the ru
 directory and leave the interactive session available for inspection.
 
 Automated tests exercise native-shaped events and real tmux with simulated CLIs,
-including blocked-agent continuation. Native CLI transport checks use an isolated
-local simulated model endpoint; they verify integration rather than model quality.
-Validated with Codex 0.155.1 (simulated CLI integration), Claude Code 2.1.278,
-OpenCode 1.18.32, and Pi 0.87.0. The three new CLIs each completed a blocked turn
-and an operator-assisted follow-up through their real interactive runtime.
+including blocked-agent continuation. The opt-in live tests use authenticated CLIs
+and their configured models to complete two dependent tasks, checking exact file
+contents, commits, live tmux sessions, and native completion callbacks. Validated
+with Codex 0.156.1, Claude Code 2.1.278, OpenCode 2.0.14, and Pi 0.87.1.

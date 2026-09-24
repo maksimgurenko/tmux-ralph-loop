@@ -2,7 +2,8 @@
 
 Use this guide when asked to install tmux-ralph-loop for a user's project.
 The tool runs directly from its checkout; there is no package build or Python
-dependency installation. Linux is the tested platform.
+dependency installation. The same runner and commands work on Linux and macOS;
+macOS prerequisite setup is covered separately below.
 
 ## 1. Identify the target and prerequisites
 
@@ -29,6 +30,25 @@ prerequisites using the host's package manager and the chosen CLI's official
 installation instructions. Only one agent CLI is required. The user must have
 authenticated that CLI and configured their desired model; a successful version
 check alone does not verify authentication.
+
+### macOS prerequisites
+
+Use an existing Python 3.9+, Git, and tmux installation if available. If any are
+missing, install them with [Homebrew](https://docs.brew.sh/Installation):
+
+```sh
+# Install only the missing prerequisites:
+brew install python git tmux
+```
+
+If Homebrew itself is missing, follow its official installation instructions
+and the printed shell setup steps. Its usual prefix is `/opt/homebrew` on
+Apple Silicon and `/usr/local` on Intel; ensure its `bin` directory is on `PATH`
+in the shell that launches the loop. Re-run the prerequisite checks above after
+setup, including the selected agent CLI's version check.
+
+The remaining instructions are identical on macOS and Linux. The `ralph` function
+below works in zsh and bash; no GNU coreutils or extra Python packages are needed.
 
 ## 2. Obtain the complete checkout
 

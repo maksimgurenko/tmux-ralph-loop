@@ -39,7 +39,9 @@ This version reads local ticket files; it does not fetch GitHub or Linear issues
 ## Quick start
 
 Requires **Python 3.9+**, **tmux**, **Git**, and your chosen authenticated agent CLI
-on `PATH`. No extra Python packages; tested on Linux.
+on `PATH`. Runs on Linux and macOS with no extra Python packages. On macOS,
+install missing prerequisites with `brew install python git tmux`; see the
+[macOS setup instructions](INSTALL.agent.md#macos-prerequisites).
 
 ```sh
 git clone https://github.com/maksimgurenko/tmux-ralph-loop.git "$HOME/tmux-ralph-loop"
@@ -133,6 +135,7 @@ python3 -m unittest discover -s tests -v
 
 Run from this tool’s checkout. Integration tests use real tmux with simulated
 agents; OpenCode/Pi adapter tests also need Node.js. No model API calls.
+The GitHub Actions test matrix covers Linux and macOS.
 
 To test your **installed, authenticated agents against real models**, opt in:
 

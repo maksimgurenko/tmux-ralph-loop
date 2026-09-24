@@ -23,7 +23,9 @@ class RalphTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="ralph-test-")
         self.addCleanup(self.temp.cleanup)
-        self.repo = Path(self.temp.name)
+        # macOS temporary paths can use /var -> /private/var. Match the
+        # runner's canonical paths so callbacks and tmux socket names agree.
+        self.repo = Path(self.temp.name).resolve()
         self.folder = self.repo / "issues"
         self.folder.mkdir()
         self.state = self.repo / "state"

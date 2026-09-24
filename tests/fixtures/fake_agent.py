@@ -9,7 +9,7 @@ import sys
 from urllib.parse import unquote, urlparse
 
 if sys.argv[1:] == ["--version"]:
-    print("0.87.0")
+    print("opencode v2.0.14" if Path(sys.argv[0]).name == "opencode" else "0.87.0")
     sys.exit(0)
 
 run = Path(os.environ["TMUX_RALPH_RUN"])
@@ -24,6 +24,7 @@ if agent == "claude":
 elif agent == "opencode":
     parser.add_argument("project")
     parser.add_argument("--auto", action="store_true")
+    parser.add_argument("--standalone", action="store_true")
     parser.add_argument("--prompt")
 else:
     parser.add_argument("--session")
@@ -55,15 +56,16 @@ def finish(outcome, turn):
     text = lambda value: [{"type": "text", "text": value}]
     payload = dict(agent=agent, cwd=meta["repo"], session={"id": run.name})
     if agent == "opencode":
-        assert args.project == meta["repo"] and args.auto
+        assert args.project == meta["repo"] and args.auto and args.standalone
         config = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])
-        payload.update(adapter=unquote(urlparse(config["plugin"][-1]).path),
-                       event={"type": "session.status", "properties": {
+        payload["session"].update(location={"directory": meta["repo"]}, outcome="succeeded")
+        payload.update(adapter=str(Path(unquote(urlparse(config["plugins"][-1]).path)) / "index.js"),
+                       event={"type": "session.status", "data": {
                            "sessionID": run.name, "status": {"type": "idle"}}},
-                       messages=[{"info": {"role": "user"}, "parts": text(meta["prompt"])},
-                                 {"info": {"role": "assistant", "id": turn,
-                                           "time": {"completed": 1}, "finish": "stop"},
-                                  "parts": text(message)}])
+                       messages=[{"type": "user", "text": meta["prompt"]},
+                                 {"type": "assistant", "id": turn, "time": {"completed": 1},
+                                  "finish": "stop", "content": text(message)},
+                                 {"type": "idle", "outcome": "succeeded"}])
     else:
         payload.update(adapter=args.extension, file=args.session, event={"type": "agent_settled"},
                        entries=[{"type": "message", "id": "user", "message": {

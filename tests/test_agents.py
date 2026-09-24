@@ -95,15 +95,17 @@ class AgentTests(unittest.TestCase):
 
     def test_launch_settings_are_per_process_and_keep_existing_opencode_plugins(self):
         run, meta = self.prepare("opencode")
-        original = json.dumps({"model": "test/model", "plugin": ["existing-plugin"], "permission": "ask"})
+        original = json.dumps({"model": "test/model", "plugins": ["existing-plugin"], "permission": "ask"})
         with patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": original}):
             command, env = ralph.agent_command(run, meta)
             self.assertEqual(os.environ["OPENCODE_CONFIG_CONTENT"], original)
         config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-        self.assertEqual(config["plugin"][0], "existing-plugin")
+        self.assertEqual(config["plugins"][0], "existing-plugin")
+        self.assertNotIn("plugin", config)
         self.assertEqual(config["model"], "test/model")
         self.assertEqual(config["permission"], "ask")
         self.assertIn("--auto", command)
+        self.assertIn("--standalone", command)
         self.assertNotIn("run", command)
         self.assertFalse((self.repo / "opencode.json").exists())
 
@@ -113,6 +115,52 @@ class AgentTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Pi 0.87.0.*required"):
                 ralph.check_agent("pi")
 
+    def test_only_opencode_v2_is_accepted(self):
+        for output, code, accepted in (("opencode v2.0.14\n", 0, True),
+                                       ("2.1.0\n", 0, True), ("1.18.32\n", 0, False),
+                                       ("3.0.0\n", 0, False), ("unknown", 0, False),
+                                       ("2.0.14\n", 1, False)):
+            with self.subTest(output=output, code=code), patch.object(
+                    ralph.shutil, "which", return_value="/test/opencode"), patch.object(
+                    ralph.subprocess, "run", return_value=subprocess.CompletedProcess([], code, output, "")):
+                if accepted:
+                    ralph.check_agent("opencode")
+                else:
+                    with self.assertRaisesRegex(ValueError, "OpenCode 2.x is required"):
+                        ralph.check_agent("opencode")
+
+    def test_opencode_startup_submits_only_the_ready_home_composer_once(self):
+        run, meta = self.prepare("opencode")
+        screen = "█▀▀█ OpenCode\nThe runner updates ticket Status. After reporting, finish your turn."
+        with patch.object(ralph, "tmux", return_value=subprocess.CompletedProcess([], 0, screen, "")) as tmux:
+            ralph.submit_opencode_prompt(self.repo, run, meta)
+            tmux.assert_not_called()  # The callback plugin must be loaded first.
+            ralph.write(run / "opencode-ready", "ready")
+            with patch.object(ralph.time, "time", return_value=10):
+                ralph.submit_opencode_prompt(self.repo, run, meta)
+            self.assertFalse((run / "opencode-submitted").exists())
+            with patch.object(ralph.time, "time", return_value=13):
+                ralph.submit_opencode_prompt(self.repo, run, meta)
+            tmux.assert_called_with(self.repo, "send-keys", "-t", meta["session"], "Enter")
+            tmux.reset_mock()
+            ralph.submit_opencode_prompt(self.repo, run, meta)
+            tmux.assert_not_called()  # Persisted across watcher restarts.
+
+    def test_opencode_startup_does_not_touch_admitted_prompts_or_other_screens(self):
+        run, meta = self.prepare("opencode")
+        ralph.write(run / "opencode-ready", "ready")
+        for screen in ("Permission required", "The runner updates ticket Status. After reporting, finish your turn.",
+                       "█▀▀█ Type your own prompt"):
+            with self.subTest(screen=screen), patch.object(
+                    ralph, "tmux", return_value=subprocess.CompletedProcess([], 0, screen, "")) as tmux:
+                ralph.submit_opencode_prompt(self.repo, run, meta)
+                self.assertFalse((run / "opencode-composer-seen").exists())
+                self.assertEqual(tmux.call_count, 1)
+        ralph.write(run / "opencode-input.json", {"sessionID": "native"})
+        with patch.object(ralph, "tmux") as tmux:
+            ralph.submit_opencode_prompt(self.repo, run, meta)
+            tmux.assert_not_called()
+
     def adapter_payload(self, agent, run, meta):
         text = lambda value: [{"type": "text", "text": value}]
         self.h.report(run, "blocked")
@@ -120,11 +168,12 @@ class AgentTests(unittest.TestCase):
         payload = {"agent": agent, "adapter": str(SCRIPT.parent / f"adapters/{agent}.mjs"),
                    "cwd": str(self.repo), "session": {"id": "main-session"}}
         if agent == "opencode":
-            payload.update(event={"type": "session.status", "properties": {
+            payload["session"].update(location={"directory": str(self.repo)}, outcome="succeeded")
+            payload.update(event={"type": "session.status", "data": {
                 "sessionID": "main-session", "status": {"type": "idle"}}}, messages=[
-                    {"info": {"role": "user"}, "parts": text(meta["prompt"])},
-                    {"info": {"role": "assistant", "id": "final", "finish": "stop", "time": {"completed": 1}},
-                     "parts": text(message)}])
+                    {"type": "user", "text": meta["prompt"]},
+                    {"type": "assistant", "id": "final", "finish": "stop", "time": {"completed": 1},
+                     "content": text(message)}, {"type": "idle", "outcome": "succeeded"}])
         else:
             payload.update(file=str(run / "pi-session.jsonl"), event={"type": "agent_settled"}, entries=[
                 {"type": "message", "id": "user", "message": {"role": "user", "content": text(meta["prompt"])}},
@@ -134,7 +183,7 @@ class AgentTests(unittest.TestCase):
 
     def emit_adapter(self, run, payload):
         result = subprocess.run(["node", str(FIXTURES / "adapter_event.mjs")], input=json.dumps(payload),
-                                env=dict(os.environ, TMUX_RALPH_RUN=str(run)), text=True, capture_output=True)
+                                env=dict(os.environ, TMUX_RALPH_RUN=str(run)), text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "requires Node.js for runtime adapters")
@@ -146,22 +195,34 @@ class AgentTests(unittest.TestCase):
         child["session"]["parentID"] = "parent"
         cases.append(child)
         other = copy.deepcopy(valid)
-        other["messages"][0]["parts"][0]["text"] = "Other prompt"
+        other["messages"][0]["text"] = "Other prompt"
         cases.append(other)
         busy = copy.deepcopy(valid)
-        busy["event"]["properties"]["status"]["type"] = "busy"
+        busy["event"]["data"]["status"]["type"] = "busy"
         cases.append(busy)
         race = copy.deepcopy(valid)
         race["busyDuringRead"] = True
         cases.append(race)
         for changes in ({"finish": "tool-calls"}, {"error": {"name": "Aborted"}},
-                        {"summary": True}, {"time": {}}):
+                        {"type": "compaction"}, {"time": {}}):
             bad = copy.deepcopy(valid)
-            bad["messages"][-1]["info"].update(changes)
+            bad["messages"][-2].update(changes)
             cases.append(bad)
         pending = copy.deepcopy(valid)
-        pending["messages"].append({"info": {"role": "user"}, "parts": [{"type": "text", "text": "Continue"}]})
+        pending["messages"].append({"type": "user", "text": "Continue"})
         cases.append(pending)
+        for changes in ({"outcome": "failed"}, {"outcome": "interrupted"},
+                        {"fork": {"sessionID": "other"}}, {"location": {"directory": "/tmp"}}):
+            bad = copy.deepcopy(valid)
+            bad["session"].update(changes)
+            cases.append(bad)
+        for outcome in ("failed", "interrupted"):
+            bad = copy.deepcopy(valid)
+            bad["messages"][-1]["outcome"] = outcome
+            cases.append(bad)
+        missing_idle = copy.deepcopy(valid)
+        missing_idle["messages"].pop()
+        cases.append(missing_idle)
         for payload in cases:
             self.emit_adapter(run, payload)
             self.assertIsNone(ralph.completion(run))
@@ -201,6 +262,55 @@ class AgentTests(unittest.TestCase):
         self.emit_adapter(run, payload)
         self.assertIsNone(ralph.completion(run))
         self.assertIn("Simulated API read failure", (run / "adapter-errors.log").read_text())
+
+    @unittest.skipUnless(shutil.which("node"), "requires Node.js for runtime adapters")
+    def test_opencode_accepts_v2_execution_events_and_records_native_prompt_admission(self):
+        run, meta = self.prepare("opencode")
+        payload = self.adapter_payload("opencode", run, meta)
+        payload["events"] = [
+            {"type": "session.inbox.enqueued", "data": {"sessionID": "main-session", "item": {
+                "type": "user", "payload": {"text": meta["prompt"]}}}},
+            {"type": "session.execution.started", "data": {"sessionID": "main-session"}},
+            {"type": "session.execution.succeeded", "data": {"sessionID": "main-session"}},
+        ]
+        self.emit_adapter(run, payload)
+        self.assertTrue((run / "opencode-ready").exists())
+        self.assertEqual(ralph.read(run / "opencode-input.json"), {"sessionID": "main-session"})
+        self.assertEqual(ralph.completion(run)["outcome"], "blocked")
+
+    @unittest.skipUnless(shutil.which("node"), "requires Node.js for runtime adapters")
+    def test_opencode_compaction_requires_a_proven_first_delivered_prompt(self):
+        run, meta = self.prepare("opencode")
+        payload = self.adapter_payload("opencode", run, meta)
+        payload["messages"].insert(0, {"type": "compaction", "status": "completed"})
+        self.emit_adapter(run, payload)
+        self.assertIsNone(ralph.completion(run))
+        created = {"type": "session.created", "data": {"sessionID": "main-session"}}
+        enqueued = {"type": "session.inbox.enqueued", "data": {"sessionID": "main-session",
+                    "inboxID": "original", "item": {"type": "user", "payload": {"text": meta["prompt"]}}}}
+        delivered = {"type": "session.inbox.delivered", "data": {
+            "sessionID": "main-session", "inboxID": "original"}}
+        # An observed enqueue alone, or an input from before subscription, is
+        # not proof of the session's first delivered prompt.
+        for events in ([created, enqueued], [enqueued, delivered]):
+            payload["events"] = events + [payload["event"]]
+            self.emit_adapter(run, payload)
+            self.assertIsNone(ralph.completion(run))
+        other = copy.deepcopy(enqueued)
+        other["data"]["inboxID"] = "earlier"
+        other["data"]["item"]["payload"]["text"] = "Unrelated original work"
+        payload["events"] = [created, other, enqueued, delivered, payload["event"]]
+        self.emit_adapter(run, payload)
+        self.assertIsNone(ralph.completion(run))
+        payload["events"] = [created, enqueued, delivered, payload["event"]]
+        self.emit_adapter(run, payload)
+        self.assertEqual(ralph.read(run / "opencode-origins.json"), {"main-session": "original"})
+        self.assertEqual(ralph.completion(run)["outcome"], "blocked")
+        before = len(list((run / "events").iterdir()))
+        payload.pop("events")
+        # A separate process simulates a plugin reload after compaction.
+        self.emit_adapter(run, payload)
+        self.assertEqual(len(list((run / "events").iterdir())), before + 1)
 
     def fake_agents(self, outcome="done"):
         folder = self.repo / "bin"

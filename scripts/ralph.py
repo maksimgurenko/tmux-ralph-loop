@@ -21,6 +21,16 @@ ticket, implement it, and run the relevant checks. Review your changes and recor
 verification evidence in the ticket before reporting completion."""
 STATUS = re.compile(r"^\*\*Status:\*\* (\S+)[ \t]*$", re.M)
 CHECK = re.compile(r"^- \[([ xX])\] (.+)$", re.M)
+# Startup dialogs that hold an agent before it can take its first turn. The loop
+# never answers one; naming it keeps a stalled run from being reported only as a
+# timeout. Matching is advisory: it explains a failure, never causes one.
+SETUP_DIALOGS = {
+    "claude": (("WARNING: Claude Code running in Bypass Permissions mode",
+                "Claude Code is waiting on its Bypass Permissions warning"),
+               ("Is this a project you created or one you trust?",
+                "Claude Code is waiting on its workspace-trust dialog")),
+    "codex": (("Trust this folder?", "Codex is waiting on its folder-trust dialog"),),
+}
 
 
 def write(path, value):
@@ -90,6 +100,19 @@ def tmux(repo, *args, check=True):
 
 def exists(repo, session):
     return tmux(repo, "has-session", "-t", "=" + session, check=False).returncode == 0
+
+
+def setup_dialog(repo, run, meta):
+    """Name a known startup dialog holding the agent before its first turn."""
+    signatures = SETUP_DIALOGS.get(meta.get("agent", "codex"))
+    if not signatures or any((run / "events").glob("*.json")):
+        return None
+    # Claude's validated UserPromptSubmit hook proves startup is complete,
+    # even while its first turn is still running and no completion event exists.
+    if meta.get("agent") == "claude" and (run / "claude-turn.json").exists():
+        return None
+    screen = tmux(repo, "capture-pane", "-p", "-t", meta["session"], check=False).stdout
+    return next((text for signature, text in signatures if signature in screen), None)
 
 
 def report_marker(event):
@@ -236,6 +259,7 @@ def run_loop(args, state):
             run = Path(data["active"])
             meta = read(run / "run.json")
             print(f"Agent selecting work: tmux -L {socket(args.repo)} attach -t {meta['session']}", flush=True)
+            announced = False
             while True:
                 submit_opencode_prompt(args.repo, run, meta)
                 result = completion(run)
@@ -245,11 +269,17 @@ def run_loop(args, state):
                 if progress.get("waiting") and (state / "STOP").exists():
                     print("Stopped watching; interactive session retained. Use start to resume watching.")
                     return 0
+                dialog = None if progress.get("waiting") else setup_dialog(args.repo, run, meta)
+                if dialog and not announced:
+                    announced = True
+                    print(f"{dialog}; the loop cannot answer it. Attach and confirm: "
+                          f"tmux -L {socket(args.repo)} attach -t {meta['session']}", flush=True)
+                stalled = f" {dialog} and never got an answer." if dialog else ""
                 if not exists(args.repo, meta["session"]) or (not progress.get("waiting") and time.time() > meta["deadline"]):
-                    raise ValueError(f"Session lost or deadline reached. No relaunch. Inspect {run}; retry explicitly after stopping any surviving work.")
+                    raise ValueError(f"Session lost or deadline reached.{stalled} No relaunch. Inspect {run}; retry explicitly after stopping any surviving work.")
                 dead = tmux(args.repo, "display-message", "-p", "-t", meta["session"], "#{pane_dead}").stdout.strip()
                 if dead == "1":
-                    raise ValueError(f"Agent exited without completion evidence. Inspect {run}; no automatic relaunch.")
+                    raise ValueError(f"Agent exited without completion evidence.{stalled} Inspect {run}; no automatic relaunch.")
                 time.sleep(2)
             # Save outcome before effects, so restart repeats only idempotent finalization.
             write(run / "outcome.json", result)

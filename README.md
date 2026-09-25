@@ -39,7 +39,11 @@ This version reads local ticket files; it does not fetch GitHub or Linear issues
 ## Quick start
 
 Requires **Python 3.9+**, **tmux**, **Git**, and your chosen authenticated agent CLI
-on `PATH`. No extra Python packages; tested on Linux.
+on `PATH`. No extra Python packages; tested on Linux and macOS.
+
+Run your chosen CLI once by hand first and accept its trust or permission dialogs.
+The loop cannot answer them, and an unanswered one stalls the first attempt until
+it times out. See [agent setup](docs/agents.md#clear-one-time-startup-dialogs-first).
 
 ```sh
 git clone https://github.com/maksimgurenko/tmux-ralph-loop.git "$HOME/tmux-ralph-loop"

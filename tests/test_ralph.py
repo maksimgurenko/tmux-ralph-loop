@@ -23,7 +23,10 @@ class RalphTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="ralph-test-")
         self.addCleanup(self.temp.cleanup)
-        self.repo = Path(self.temp.name)
+        # The runner resolves --repo, and the tmux socket name hashes that path.
+        # Keep the same spelling here or macOS's /var -> /private/var symlink puts
+        # the tests on a different socket than the runner they started.
+        self.repo = Path(self.temp.name).resolve()
         self.folder = self.repo / "issues"
         self.folder.mkdir()
         self.state = self.repo / "state"

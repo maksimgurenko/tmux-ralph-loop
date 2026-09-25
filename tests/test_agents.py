@@ -325,6 +325,52 @@ class AgentTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
+    def test_claude_setup_detection_stops_when_first_prompt_is_admitted(self):
+        run, meta = self.prepare("claude")
+        warning = "WARNING: Claude Code running in Bypass Permissions mode"
+        with patch.object(ralph, "tmux", return_value=subprocess.CompletedProcess([], 0, warning, "")):
+            self.assertIsNotNone(ralph.setup_dialog(self.repo, run, meta))
+            self.hook(run, meta, "UserPromptSubmit", prompt="Unrelated prompt")
+            self.assertIsNotNone(ralph.setup_dialog(self.repo, run, meta))
+            self.hook(run, meta, "UserPromptSubmit", prompt=meta["prompt"])
+            # The first turn is active, with no completion event yet. Echoed
+            # warning text must no longer be mistaken for a startup dialog.
+            self.assertFalse(list((run / "events").glob("*.json")))
+            self.assertIsNone(ralph.setup_dialog(self.repo, run, meta))
+
+    @unittest.skipUnless(shutil.which("tmux"), "requires tmux")
+    def test_unanswered_setup_dialog_is_named_instead_of_a_bare_timeout(self):
+        # A CLI that renders a startup dialog and waits: the agent never takes a
+        # turn, so the loop must say what is holding it, not only that time ran out.
+        folder = self.repo / "bin"
+        folder.mkdir()
+        stuck = folder / "claude"
+        stuck.write_text("#!/bin/sh\n"
+                         "echo 'WARNING: Claude Code running in Bypass Permissions mode'\n"
+                         "sleep 60\n")
+        stuck.chmod(0o755)
+        self.addCleanup(lambda: ralph.tmux(self.repo, "kill-server", check=False))
+        self.h.ticket()
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "run", "--repo", str(self.repo),
+             "--tickets", str(self.h.folder), "--state", str(self.state),
+             "--agent", "claude", "--timeout", "3"],
+            env=dict(os.environ, PATH=str(folder) + os.pathsep + os.environ["PATH"]),
+            text=True, capture_output=True, timeout=60)
+        output = result.stdout + result.stderr
+        active = Path(ralph.read(self.state / "state.json")["active"])
+        meta = ralph.read(active / "run.json")
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("Bypass Permissions warning; the loop cannot answer it", output)
+        self.assertIn("attach -t " + meta["session"], output)
+        self.assertIn("never got an answer", output)
+        # The dialog is still on the retained pane, but once the agent has taken a
+        # turn its screen is its own business and must not be read as a stall.
+        self.assertEqual(ralph.setup_dialog(self.repo, active, meta),
+                         "Claude Code is waiting on its Bypass Permissions warning")
+        ralph.write(active / "events" / "one.json", {"type": "agent-turn-complete"})
+        self.assertIsNone(ralph.setup_dialog(self.repo, active, meta))
+
     @unittest.skipUnless(shutil.which("tmux") and shutil.which("node"), "requires tmux and Node.js")
     def test_each_agent_implements_dependency_chain(self):
         self.fake_agents()

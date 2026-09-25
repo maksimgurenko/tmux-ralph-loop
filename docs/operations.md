@@ -53,7 +53,10 @@ After that, the live conversation can wait for operator input indefinitely.
 ## Abandoning an attempt
 
 A timeout or lost/dead worker stops the watcher without automatically dispatching
-replacement work. Inspect the retained session and logs first.
+replacement work. Inspect the retained session and logs first. A first attempt that
+times out having done nothing is usually an unanswered startup dialog rather than a
+stuck model; the watcher names recognized ones, and
+[agent setup](agents.md#clear-one-time-startup-dialogs-first) covers clearing them.
 
 To abandon it deliberately:
 

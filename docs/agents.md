@@ -14,8 +14,12 @@ there is no additional package installation for the loop.
 Most CLIs show a trust or permission dialog the first time they run somewhere new,
 and they wait for a keypress before reading any prompt. The loop never answers one
 for you: it dispatches the agent, the dialog holds the terminal, no turn ever ends,
-and the attempt fails at its timeout. Run your chosen CLI once by hand in a throwaway
-directory, accept whatever it asks, and the loop starts cleanly afterwards.
+and the attempt fails at its timeout. Run your chosen CLI once by hand **from the
+target project repository**, using the same permission flags as the loop: for
+Claude Code, `claude --dangerously-skip-permissions`; for Codex,
+`codex --yolo --no-alt-screen`. Accept the startup dialogs and exit the CLI before
+starting the loop. Workspace trust applies to that repository; accepting it in a
+throwaway directory does not clear the target repository's trust dialog.
 
 When a recognized dialog is on screen, `run` and `start` name it and print the attach
 command instead of waiting silently, and the timeout error says the dialog was never
@@ -39,9 +43,11 @@ your user and project settings are not edited.
 That flag makes Claude Code show a **Bypass Permissions** warning until it is accepted
 once on the machine, on top of the usual workspace-trust dialog for a directory it has
 not seen. Both block the run. Accept them by running `claude --dangerously-skip-permissions`
-yourself once, or set `skipDangerousModePermissionPrompt` in your Claude settings, before
-starting the loop. Each ticket also runs in a fresh session, so a repository Claude Code
-has never opened raises the trust dialog on the first attempt.
+yourself from the target repository before starting the loop. Setting
+`skipDangerousModePermissionPrompt` in your Claude settings suppresses only the
+machine-wide bypass warning; it does not grant workspace trust. Each ticket runs
+in a fresh session, and a repository Claude Code has never opened raises the trust
+dialog on the first attempt.
 
 The adapter records the original input through `UserPromptSubmit` and reads the
 final assistant message from `Stop`. It accepts only the allocated main session

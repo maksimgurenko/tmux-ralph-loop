@@ -107,6 +107,10 @@ def setup_dialog(repo, run, meta):
     signatures = SETUP_DIALOGS.get(meta.get("agent", "codex"))
     if not signatures or any((run / "events").glob("*.json")):
         return None
+    # Claude's validated UserPromptSubmit hook proves startup is complete,
+    # even while its first turn is still running and no completion event exists.
+    if meta.get("agent") == "claude" and (run / "claude-turn.json").exists():
+        return None
     screen = tmux(repo, "capture-pane", "-p", "-t", meta["session"], check=False).stdout
     return next((text for signature, text in signatures if signature in screen), None)
 

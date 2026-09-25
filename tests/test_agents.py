@@ -325,6 +325,19 @@ class AgentTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
+    def test_claude_setup_detection_stops_when_first_prompt_is_admitted(self):
+        run, meta = self.prepare("claude")
+        warning = "WARNING: Claude Code running in Bypass Permissions mode"
+        with patch.object(ralph, "tmux", return_value=subprocess.CompletedProcess([], 0, warning, "")):
+            self.assertIsNotNone(ralph.setup_dialog(self.repo, run, meta))
+            self.hook(run, meta, "UserPromptSubmit", prompt="Unrelated prompt")
+            self.assertIsNotNone(ralph.setup_dialog(self.repo, run, meta))
+            self.hook(run, meta, "UserPromptSubmit", prompt=meta["prompt"])
+            # The first turn is active, with no completion event yet. Echoed
+            # warning text must no longer be mistaken for a startup dialog.
+            self.assertFalse(list((run / "events").glob("*.json")))
+            self.assertIsNone(ralph.setup_dialog(self.repo, run, meta))
+
     @unittest.skipUnless(shutil.which("tmux"), "requires tmux")
     def test_unanswered_setup_dialog_is_named_instead_of_a_bare_timeout(self):
         # A CLI that renders a startup dialog and waits: the agent never takes a

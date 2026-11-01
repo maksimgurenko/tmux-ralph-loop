@@ -1,17 +1,15 @@
 # tmux-ralph-loop
 
-A resumable ticket loop for **Codex, Claude Code, OpenCode, and Pi**, running interactively in tmux.
+Run **local Markdown tickets, GitHub issues, or GitLab issues** one at a time with
+**Codex, Claude Code, OpenCode, or Pi** in tmux. Each attempt gets a fresh agent
+session; the loop continues until the work is done or your input is needed.
 
-Developed specifically for [Matt Pocock’s skill workflow](https://github.com/mattpocock/skills):
-plan the work, produce a spec, break it into tickets, then let the loop drive
-implementation. It automates opening a session, running
-[`implement`](https://github.com/mattpocock/skills/blob/main/skills/engineering/implement/SKILL.md),
-waiting for it to finish, and opening the next session—until the tickets are done
-or your input is needed.
+**Blocked agents keep their conversation.** Attach to the session, answer the
+agent, and let it continue. Restart the watcher after an interruption to keep
+watching the same worker.
 
-**Agents can mark themselves blocked when they need something from you.** Because
-they run interactively inside tmux, you can attach to their session, answer
-questions, and unblock the same agent without starting over.
+Built for [Matt Pocock’s skill workflow](#from-idea-to-implementation), with
+built-in implementation instructions available when no skills are installed.
 
 ## Why use it?
 
@@ -20,50 +18,106 @@ questions, and unblock the same agent without starting over.
 - **Inspect progress:** keep prompts, terminal logs, reports, and runtime events on disk.
 - **Keep dependencies in order:** completed blockers and unchanged, checked acceptance criteria gate progress.
 
-## From idea to implementation
-
-Install [Matt’s skills](https://github.com/mattpocock/skills#installation-30-second-setup)
-and run [`setup-matt-pocock-skills`](https://github.com/mattpocock/skills/blob/main/skills/engineering/setup-matt-pocock-skills/SKILL.md)
-for your project, choosing **local Markdown files** as the tracker.
-
-1. Run [`wayfinder`](https://github.com/mattpocock/skills/blob/main/skills/engineering/wayfinder/SKILL.md)
-   over a few sessions to work through the decisions until the path is clear.
-2. Use [`to-spec`](https://github.com/mattpocock/skills/blob/main/skills/engineering/to-spec/SKILL.md)
-   to turn the resolved decisions into a specification.
-3. Use [`to-tickets`](https://github.com/mattpocock/skills/blob/main/skills/engineering/to-tickets/SKILL.md)
-   to create numbered, dependency-linked tickets under `.scratch/<feature>/issues/`.
-4. Start this loop with the skill prompt below. It handles the repeated implementation sessions.
-
-This version reads local ticket files; it does not fetch GitHub or Linear issues.
-
 ## Quick start
 
 Requires **Python 3.9+**, **tmux**, **Git**, and your chosen authenticated agent CLI
 on `PATH`. No extra Python packages; tested on Linux and macOS.
 
-Run your chosen CLI once by hand first and accept its trust or permission dialogs.
-The loop cannot answer them, and an unanswered one stalls the first attempt until
-it times out. See [agent setup](docs/agents.md#clear-one-time-startup-dialogs-first).
+Before starting the loop, run your chosen agent by hand **from the target project**
+with the loop's permission flags and accept its startup dialogs. For Codex, use
+`codex --yolo --no-alt-screen`; for Claude, use `claude --dangerously-skip-permissions`.
+See [agent setup](docs/agents.md#clear-one-time-startup-dialogs-first) for the other CLIs.
+The loop cannot answer startup dialogs, and they can stall the first attempt.
 
 ```sh
 git clone https://github.com/maksimgurenko/tmux-ralph-loop.git "$HOME/tmux-ralph-loop"
 cd /path/to/your/project
 # Add .ralph/ to this project's .gitignore before starting.
 
-# Replace my-feature with the directory generated for your tickets.
 ralph() {
-  python3 "$HOME/tmux-ralph-loop/scripts/ralph.py" "$@" \
-    --tickets "$PWD/.scratch/my-feature/issues"
+  python3 "$HOME/tmux-ralph-loop/scripts/ralph.py" "$@"
 }
 
+ralph -h
+
+# Replace my-feature with the directory generated for your local tickets.
+ralph status --tickets "$PWD/.scratch/my-feature/issues"
+ralph start --tickets "$PWD/.scratch/my-feature/issues"
 ralph status
-ralph start --prompt '$implement Choose one eligible unfinished ticket and implement it.'
 tail -f .ralph/loop.log
 ```
 
-Run these commands from the target repository. The agent inherits its own authentication
-and model settings and is instructed to commit completed ticket work on the current
-branch while preserving unrelated changes.
+Add the `ralph` function to your shell configuration to keep it available. You can
+also invoke `python3 /path/to/tmux-ralph-loop/scripts/ralph.py` directly. Keep the
+complete checkout, including its bundled adapters.
+
+Run from the target repository, or pass `--repo /path/to/project`. The agent uses
+its existing authentication and model settings. It commits completed work on the
+current branch while preserving unrelated changes. Prepare tickets in the
+[local format](#ticket-format), or choose a remote source below.
+
+## CLI help
+
+```sh
+ralph -h           # commands, grouped options, defaults, and examples
+ralph start -h     # detached startup and saved settings
+ralph run -h       # foreground watching and limits
+ralph status -h    # progress and attach commands
+ralph stop -h      # graceful stopping
+ralph retry -h     # abandoning and requeueing an attempt
+```
+
+Options work before or after the command: `ralph --repo /path/to/project status`
+and `ralph status --repo /path/to/project` are equivalent.
+
+## Choose an issue source
+
+Choose one source for each state directory:
+
+| Source | Start command | Requires |
+| --- | --- | --- |
+| Local Markdown (default) | `ralph start --tickets .scratch/my-feature/issues` | One file per ticket |
+| GitHub | `ralph start --tracker github` | Authenticated `gh` (`gh auth login`) |
+| GitLab | `ralph start --tracker gitlab` | Authenticated `glab` (`glab auth login`) |
+
+The repository is inferred by `gh`/`glab` from the target checkout. Override it
+with `--project owner/repo` (GitHub), `--project group/subgroup/project` (GitLab),
+or a full repository URL for a self-hosted instance.
+
+Only open issues labelled `ready-for-agent` are included by default. To select
+a specific feature, pass every required label:
+
+```sh
+ralph start --tracker github --label ready-for-agent --label feature:checkout
+```
+
+`--label` replaces the default filter; repeated labels must **all** match. Every
+eligible issue needs acceptance checkboxes in its body. The agent chooses one
+eligible issue per attempt, using its actual issue number, such as `123`.
+
+The loop checks native blocking relationships and explicit `Blocked by` fields.
+All blockers must be closed, including blockers outside the label filter or in
+another project on the same host. See [remote issue details](docs/operations.md#remote-issues).
+
+The agent updates checkboxes and evidence in the remote issue body and commits
+its code changes. After a matching report and turn-end event, the runner checks
+the original criteria and closes the issue. Blocked attempts use a `ralph:blocked`
+label and keep their interactive session. `ralph retry 123` clears that label
+after you stop the watcher and worker.
+
+`start`, `run`, and `retry` remember the tracker, project, ticket directory, and
+label filter. Later `status`, `start`, and `retry` commands can omit them. To
+choose a different source or filter, use a separate `--state` directory; use that
+same directory for subsequent commands. `status` only reads and does not save a choice.
+
+For example, keep a GitHub run separate from existing local state:
+
+```sh
+ralph start --tracker github --state .ralph/github
+ralph status --state .ralph/github
+# Later, after the watcher stops, resume with the saved source and agent:
+ralph start --state .ralph/github
+```
 
 ## Choose an agent
 
@@ -76,10 +130,8 @@ Codex is the default. Select another CLI with `--agent`:
 | [OpenCode](https://opencode.ai/v2/docs/) (2.x only) | `ralph start --agent opencode` |
 | [Pi](https://pi.dev/docs/latest/quickstart) (0.87.0+) | `ralph start --agent pi` |
 
-Each uses its native interactive interface and completion hooks. The selected agent
-is remembered across restarts; active runs cannot switch agents. For Matt’s workflow
-across CLIs, add `--prompt 'Use the implement skill to implement one eligible ticket.'`
-with that skill installed for your chosen agent.
+Each uses its native interactive interface and completion hooks. The selected
+agent is remembered across restarts; active runs cannot switch agents.
 
 The loop uses Codex’s `--yolo`, Claude’s `--dangerously-skip-permissions`, and
 OpenCode’s `--auto`; Pi uses its normal tool permissions. See
@@ -93,15 +145,16 @@ A blocked agent keeps its conversation; the loop waits for a fresh completion re
 
 | Command | Effect |
 | --- | --- |
+| `ralph start` | Start or resume a detached watcher and clear a previous stop request. |
+| `ralph run` | Watch in the foreground; the agent still runs in tmux. |
 | `ralph status` | Show tickets, active session, attach command, and log location. |
-| `ralph run --prompt '…'` | Watch in the foreground; the agent still runs in tmux. |
-| `ralph stop` | Finish the current attempt, then dispatch no more work. If already blocked, stop watching and retain the agent. |
-| `ralph start --prompt '…'` | Start or resume watching; clear a previous stop request. Repeat your custom prompt for future attempts. |
-| `ralph retry 02` | Explicitly requeue an unfinished ticket and reset its attempt budget, after stopping the watcher and any active worker. |
+| `ralph stop` | Request a stop after the current attempt. If already blocked, stop watching and retain the agent. |
+| `ralph retry TICKET` | Requeue an unfinished local ticket or remote issue and reset its attempt count. Requires stopping the watcher and worker first. |
 
-Ctrl-C preserves the worker. Timeouts and lost workers stop dispatch.
-See [configuration and recovery details](docs/operations.md) for limits, state,
-and abandoning an attempt.
+**`stop` does not kill the worker.** Ctrl-C in the watcher also preserves it.
+Use `start` to resume watching. Before `retry`, inspect and stop the watcher and
+worker using the [abandonment steps](docs/operations.md#abandoning-an-attempt).
+Timeouts and lost workers stop dispatch without launching a replacement.
 
 ## Customize
 
@@ -115,19 +168,58 @@ ralph start --prompt-file /path/to/instructions.md
 ```
 
 The loop appends ticket context and reporting rules. Prompt text is literal, and
-files are read once at startup. Resumed conversations keep their original prompt.
+files are read once at startup. Resumed conversations keep their original prompt;
+repeat a custom override when restarting to use it for future attempts.
 
-Defaults: `--repo` is the current directory, `--tickets` is `<repo>/issues`, and
-`--state` is `<repo>/.ralph`. Use the same ticket/state paths on later commands.
+Limit automatic attempts or the initial autonomous turn:
+
+```sh
+ralph run --max-attempts 2 --timeout 3600
+```
+
+Defaults are **3 reported attempts per ticket** and **28800 seconds (8 hours)**
+for the initial autonomous turn. Assisted follow-ups do not add attempts. Once a
+blocked report is accepted, the conversation can wait for your input indefinitely.
+Timeouts preserve the worker. See [all configuration defaults](docs/operations.md#configuration).
+
+## From idea to implementation
+
+For [Matt Pocock’s skill workflow](https://github.com/mattpocock/skills), install
+the skills for your chosen agent and run
+[`setup-matt-pocock-skills`](https://github.com/mattpocock/skills/blob/main/skills/engineering/setup-matt-pocock-skills/SKILL.md)
+in the target project. Choose local Markdown, GitHub, or GitLab to match the loop.
+
+1. Use [`wayfinder`](https://github.com/mattpocock/skills/blob/main/skills/engineering/wayfinder/SKILL.md)
+   to work through the decisions until the path is clear.
+2. Use [`to-spec`](https://github.com/mattpocock/skills/blob/main/skills/engineering/to-spec/SKILL.md)
+   to turn those decisions into a specification.
+3. Use [`to-tickets`](https://github.com/mattpocock/skills/blob/main/skills/engineering/to-tickets/SKILL.md)
+   to create issues with blocking dependencies in your chosen tracker.
+4. Start the loop with the
+   [`implement`](https://github.com/mattpocock/skills/blob/main/skills/engineering/implement/SKILL.md) skill:
+
+```sh
+ralph start --prompt 'Use the implement skill to implement one eligible ticket.'
+```
+
+Add your source options on the first start. The loop handles the repeated
+implementation sessions; you can attach whenever an agent needs your input.
 
 ## Ticket format
 
-Use one `NN-slug.md` file per ticket, with `**Status:**`, `**Blocked by:**`, and
-acceptance checkboxes, as shown in the [two example tickets](examples/issues).
+Use one `NN-slug.md` file per local ticket, with `**Status:**`, `**Blocked by:**`,
+and acceptance checkboxes. See the [two example tickets](examples/issues).
 Dependencies must link to earlier ticket numbers. Only `ready-for-agent` tickets
-with completed blockers are eligible. The runner updates status after a matching
-report and turn-end event; completion also requires unchanged, checked acceptance
-criteria. These checks validate reported completion, not independently prove correctness.
+with completed blockers are eligible.
+
+For remote issues, put acceptance checkboxes in the issue body and use native
+dependencies or an explicit `Blocked by` field. See the
+[supported remote formats](docs/operations.md#remote-issues).
+
+Completion requires a fresh report, its matching turn-end event, and the original
+criteria checked without changes to their text. The runner updates local status
+or closes the remote issue after accepting that evidence. It does not rerun the
+tests or independently verify correctness.
 
 ## Tests and license
 
@@ -137,6 +229,8 @@ python3 -m unittest discover -s tests -v
 
 Run from this tool’s checkout. Integration tests use real tmux with simulated
 agents; OpenCode/Pi adapter tests also need Node.js. No model API calls.
+Tracker tests use simulated `gh`/`glab` services, including dependent issues,
+remote completion checks, and recovery after a failed close. They do not modify real issues.
 
 To test your **installed, authenticated agents against real models**, opt in:
 

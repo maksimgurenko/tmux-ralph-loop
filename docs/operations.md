@@ -1,6 +1,7 @@
 # Recovery and runtime details
 
-Use the same `--repo`, `--tickets`, and `--state` values on every command. The
+Use the same `--repo` and `--state` values on every command. The issue source and
+ticket directory are remembered after `start`, `run`, or `retry`. The
 examples below assume the `ralph` shell function in the README and default state.
 
 ## Configuration
@@ -9,7 +10,10 @@ examples below assume the `ralph` shell function in the README and default state
 | --- | --- |
 | `--agent` | Recorded agent, or `codex` for a new state directory |
 | `--repo` | Current directory |
-| `--tickets` | `<repo>/issues` |
+| `--tracker` | Recorded source, or `local`; also supports `github` and `gitlab` |
+| `--project` | Recorded remote project, otherwise inferred by `gh`/`glab` |
+| `--label` | Recorded filter, otherwise `ready-for-agent`; repeat to require all labels |
+| `--tickets` | Recorded local directory, otherwise `<repo>/issues`; local tracker only |
 | `--state` | `<repo>/.ralph` |
 | `--max-attempts` | `3` reported attempts per ticket |
 | `--timeout` | `28800` seconds (eight hours) for the initial autonomous turn |
@@ -29,10 +33,61 @@ Older checkpoints without an agent field are treated as Codex runs.
 request. `run` watches in the foreground; remove `.ralph/STOP` to resume dispatch
 after a previous `stop` when using `run`.
 
-Ticket statuses are `ready-for-agent`, `in-progress`, `blocked`, and `done`.
+Local ticket statuses are `ready-for-agent`, `in-progress`, `blocked`, and `done`.
 Use `**Blocked by:** None (can start immediately).` when there are no dependencies;
 otherwise use links in the form `[01: Title](01-slug.md)`. Each ticket must have at
 least one acceptance checkbox. A ticket marked done with unchecked criteria is rejected.
+
+## Remote issues
+
+The `github` tracker uses the authenticated `gh` CLI; `gitlab` uses `glab`.
+Both read every page of open issues matching all configured labels. GitHub pull
+requests are excluded. Remote issues use their native number, without `#` or
+zero-padding, when reporting or retrying. Each attempt retains its issue bodies,
+URLs, and dependency state in `runs/<run-id>/issues.json`.
+
+An issue is eligible if it matches the label filter, has no `ralph:blocked` label,
+and all its blockers are closed. Dependencies can be native GitHub issue
+dependencies, GitLab `is_blocked_by` links, or references in either form below:
+
+```markdown
+Blocked by: #123, other/project#456
+```
+
+```markdown
+## Blocked by
+- #123
+- https://gitlab.example.com/group/project/-/issues/456
+```
+
+`**Blocked by:**` is also supported. Use `None` when an explicit field has no
+blockers. References outside the selected labels or project are fetched directly;
+text references must point to the same host and tracker. Parent references and
+ordinary mentions elsewhere in the body are not dependencies. Native links and
+text references are both checked when present. If a server lacks native dependency
+endpoints (HTTP 404/410), an explicit `Blocked by` field is required as a fallback.
+Access and network failures stop the watcher with the current run retained.
+
+The agent reads current issue details/comments and edits acceptance checkboxes
+and evidence in the issue body. It leaves state and the `ralph:blocked` label to
+the runner. Completed reports require the original checked criteria and closed
+blockers to pass another remote read before closing. The runner posts no comments.
+Blocking adds `ralph:blocked` while retaining the scope labels; retry removes it,
+and completion clears it and closes the issue. The GitHub label is created on
+first use; the CLI needs permission to create/apply labels and edit issues.
+
+If no open issues match the filter, the loop exits successfully. If matching
+issues exist but all are blocked, it exits without launching an agent. Restart
+after resolving their blockers or use `retry` for an abandoned attempt. An active
+blocked agent can still accept your input in its existing conversation.
+
+The source and filter are bound to a state directory to prevent attempts from
+different projects sharing number-based accounting. To change them, finish or
+stop the current worker and select a different `--state`. The repository lock
+still prevents concurrent watchers in the same working tree. Separate clones
+and other people are not coordinated by this lock.
+Older local checkpoints with recorded attempts also need a separate `--state`
+when switching to remote issues.
 
 ## Answering a blocked agent
 
@@ -79,6 +134,7 @@ The default `.ralph/` directory contains:
 
 - `loop.log`: detached watcher output.
 - `state.json`: active run and attempt counts.
+- `source.json`: tracker, project or local directory, and label filter.
 - `runs/<run-id>/`: assembled prompt, ticket snapshot, runtime events, immutable
   per-turn reports, terminal output, agent-specific hook/session files, and progress/outcome records.
 - `STOP`: graceful stop request, cleared by `start`.
@@ -88,7 +144,7 @@ Successful and retrying workers close after accepted turn completion; their logs
 remain. A blocked report or exhausted retry budget preserves the worker for
 input. Assisted follow-up turns do not consume additional attempts.
 
-Ticket checkboxes and evidence are committed by the agent before reporting;
+Local ticket checkboxes and evidence are committed by the agent before reporting;
 the runner writes the ticket’s final status afterward, so that status update may
 remain uncommitted. The runner does not independently verify the reported commit
 or rerun the ticket’s tests.

@@ -14,6 +14,7 @@ import io
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/ralph.py"
+sys.path.insert(0, str(SCRIPT.parent))
 spec = importlib.util.spec_from_file_location("ralph", SCRIPT)
 ralph = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ralph)
@@ -415,10 +416,11 @@ class RalphTests(unittest.TestCase):
 
     def fake_codex(self, outcome):
         self.bin = self.repo / "bin"
-        self.bin.mkdir()
+        self.bin.mkdir(exist_ok=True)
         fake = self.bin / "codex"
         fake.write_text(f'''#!{sys.executable}
 import argparse, json, pathlib, subprocess, sys
+from urllib.parse import quote
 parser = argparse.ArgumentParser()
 parser.add_argument('--yolo', action='store_true')
 parser.add_argument('--no-alt-screen', action='store_true')
@@ -432,18 +434,32 @@ meta = json.loads((run / 'run.json').read_text())
 assert args.prompt == meta['prompt'], 'Prompt changed during launch'
 # Simulate an agent selecting independently, deliberately preferring higher IDs.
 eligible = [n for n, t in meta['tickets'].items() if t['status'] == 'ready-for-agent'
+            and not t.get('blocked', False)
             and all(meta['tickets'][b]['status'] == 'done' for b in t['blockers'])]
 number = sorted(eligible, reverse=True)[0]
-ticket = pathlib.Path(meta['tickets'][number]['path'])
+
+def check_ticket():
+    if 'source' in meta:
+        source = meta['source']
+        github = source['tracker'] == 'github'
+        root = 'repos/' + source['project'] if github else 'projects/' + quote(source['project'], safe='')
+        body = json.loads((run / 'issues.json').read_text())[number]['body'].replace('[ ]', '[x]')
+        subprocess.run(['gh' if github else 'glab', 'api', '--hostname', source['host'],
+                        root + '/issues/' + number, '--method', 'PATCH' if github else 'PUT', '--input', '-'],
+                       input=json.dumps({{'body' if github else 'description': body}}), text=True, check=True)
+    else:
+        ticket = pathlib.Path(meta['tickets'][number]['path'])
+        ticket.write_text(ticket.read_text().replace('[ ]', '[x]'))
+
 outcome = {outcome!r}
 if outcome == 'done':
-    ticket.write_text(ticket.read_text().replace('[ ]', '[x]'))
+    check_ticket()
 reported = subprocess.run([sys.executable, notify[1], '_report', str(run), 'blocked' if outcome == 'interactive' else outcome, number, 'Simulated model result'], check=True, capture_output=True, text=True)
 event = {{'type': 'agent-turn-complete', 'cwd': meta['repo'], 'input-messages': [meta['prompt']], 'thread-id': run.name, 'turn-id': 'one', 'last-assistant-message': reported.stdout.strip()}}
 subprocess.run(notify + [json.dumps(event)], check=True)
 if outcome == 'interactive':
     followup = input('Blocked. Supply instructions: ')
-    ticket.write_text(ticket.read_text().replace('[ ]', '[x]'))
+    check_ticket()
     reported = subprocess.run([sys.executable, notify[1], '_report', str(run), 'done', number, 'Fixed after human input'], check=True, capture_output=True, text=True)
     event.update({{'turn-id': 'two', 'input-messages': [meta['prompt'], followup], 'last-assistant-message': reported.stdout.strip()}})
     subprocess.run(notify + [json.dumps(event)], check=True)

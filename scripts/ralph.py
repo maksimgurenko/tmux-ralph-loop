@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import uuid
+from trackers import RemoteIssues, remote_config
 
 SCRIPT = Path(__file__).resolve()
 AGENTS = ("codex", "claude", "opencode", "pi")
@@ -79,7 +80,47 @@ def tickets(folder):
 
 def frontier(found):
     return [n for n, t in found.items() if t["status"] == "ready-for-agent"
+            and not t.get("blocked", False)
             and all(found[b]["status"] == "done" for b in t["blockers"])]
+
+
+def source_config(args, state):
+    saved = read(state / "source.json") if (state / "source.json").exists() else None
+    tracker = args.tracker or (saved["tracker"] if saved else "local")
+    if tracker == "local":
+        if args.project or args.label:
+            raise ValueError("--project and --label require --tracker github or gitlab")
+        folder = args.tickets or (Path(saved["tickets"]) if saved and saved["tracker"] == "local"
+                                  else args.repo / "issues")
+        config = dict(tracker="local", tickets=str(folder.resolve()))
+    else:
+        if args.tickets:
+            raise ValueError("--tickets is only for local Markdown tickets")
+        if saved and saved["tracker"] == tracker and not args.project:
+            config = dict(saved)
+            if args.label:
+                config["labels"] = sorted(set(args.label))
+        else:
+            labels = args.label or (saved["labels"] if saved and saved["tracker"] == tracker else None)
+            config = remote_config(tracker, args.project, labels, args.repo)
+    if saved and saved != config:
+        raise ValueError("This state directory already belongs to a different issue source or filter; use another --state")
+    return config
+
+
+def load_tickets(args):
+    source = getattr(args, "source", None)
+    if not source or source["tracker"] == "local":
+        return tickets(args.tickets)
+    return RemoteIssues(source, args.repo).load()
+
+
+def mark_ticket(meta, number, status):
+    source = meta.get("source", {"tracker": "local"})
+    if source["tracker"] == "local":
+        mark(Path(meta["tickets"][number]["path"]), status)
+    else:
+        RemoteIssues(source, Path(meta["repo"])).mark(number, status)
 
 
 def mark(path, status):
@@ -168,37 +209,66 @@ def completion(run):
         return result
     selected = meta["tickets"].get(number)
     if (not selected or selected["status"] != "ready-for-agent"
+            or selected.get("blocked", False)
             or any(meta["tickets"][b]["status"] != "done" for b in selected["blockers"])):
         return dict(outcome="blocked", ticket=None,
                     summary=f"Reported ticket {number} was not eligible; inspect the agent's selection.", **evidence)
     if result["outcome"] == "done":
-        checks = CHECK.findall(Path(selected["path"]).read_text())
+        if meta.get("source", {}).get("tracker", "local") == "local":
+            body = Path(selected["path"]).read_text()
+        else:
+            current = RemoteIssues(meta["source"], Path(meta["repo"])).current(number)
+            body = current["body"]
+            if current["blocked"]:
+                return dict(outcome="blocked", ticket=number,
+                            summary="Done rejected: issue has open blockers.", **evidence)
+        checks = CHECK.findall(body)
         if [text for _, text in checks] != selected["criteria"] or any(x == " " for x, _ in checks):
             return dict(outcome="blocked", ticket=number,
                         summary="Done rejected: criteria changed or remain unchecked.", **evidence)
     return result
 
 
-def prepare(repo, state, folder, attempts, timeout, instructions=DEFAULT_PROMPT, agent="codex"):
-    found = tickets(folder)
+def prepare(repo, state, folder, attempts, timeout, instructions=DEFAULT_PROMPT, agent="codex",
+            source=None, found=None):
+    found = found if found is not None else tickets(folder)
+    remote = source and source["tracker"] != "local"
     run = state / "runs" / ("run-" + uuid.uuid4().hex[:12])
     (run / "events").mkdir(parents=True)
     report = shlex.join([sys.executable, str(SCRIPT), "_report", str(run)])
+    context = f"Ticket directory: {folder}"
+    selection = "Choose exactly one ticket with Status ready-for-agent whose blockers are all done."
+    number_format = "two-digit number"
+    commit_evidence = ", including its checkbox\nand verification-evidence updates,"
+    if remote:
+        for number in frontier(found):
+            if not CHECK.findall(found[number]["body"]):
+                raise ValueError(f"Issue #{number} has no acceptance checkboxes")
+        write(run / "issues.json", found)
+        context = (f"Issue tracker: {source['tracker']} on {source['host']}/{source['project']}\n"
+                   f"Read the issue snapshot at {run / 'issues.json'}.\n"
+                   f"Eligible issue numbers: {', '.join(frontier(found)) or 'none'}.\n"
+                   "Use the issue URL with gh/glab to read current details and comments.\n"
+                   "Update acceptance checkboxes and verification evidence in the remote issue body.\n"
+                   "The runner closes completed issues and manages the ralph:blocked label.\n"
+                   "Leave issue state and that label to the runner.")
+        number_format = "issue number without # or zero-padding"
+        commit_evidence = ""
+        selection = "Choose exactly one eligible issue from the snapshot whose blockers are all closed."
     prompt = f"""{instructions}
 
-Ticket directory: {folder}
-Choose exactly one ticket with Status ready-for-agent whose blockers are all done.
+{context}
+{selection}
 Read its dependencies and linked specification as needed. Do not work on other tickets.
 
 Before your final response in each turn, report once using one of:
   {report} done <ticket-number> 'Summary and verification evidence'
   {report} retry <ticket-number> 'Progress made; concrete remaining implementation work'
   {report} blocked <ticket-number-or-dash> 'Exact missing access, decision, human action or evidence'
-Report the two-digit number of the ticket you selected; use - if none can be selected.
+Report the {number_format} of the ticket you selected; use - if none can be selected.
 For done, check off each satisfied original acceptance criterion and record its
 verification evidence in the ticket. Report done only when all criteria are satisfied.
-Before reporting done, commit the completed ticket's changes, including its checkbox
-and verification-evidence updates, to the current branch. Commit only changes for
+Before reporting done, commit the completed ticket's changes{commit_evidence} to the current branch. Commit only changes for
 this ticket, preserve unrelated work, and include the commit hash in the done summary.
 Use retry for work another fresh context can finish without human input.
 Use blocked when human input, external access or required evidence is missing.
@@ -207,12 +277,15 @@ If the operator follows up in this session, report again with a fresh marker.
 The runner updates ticket Status. After reporting, finish your turn.
 """
     write(run / "prompt.txt", prompt)
-    snapshot = {n: dict(path=str(t["path"]), status=t["status"], blockers=t["blockers"],
+    snapshot = {n: dict(**({"url": t["url"], "blocked": t["blocked"]} if remote else {"path": str(t["path"])}),
+                        status=t["status"], blockers=t["blockers"],
                         criteria=[text for _, text in CHECK.findall(t["body"])])
                 for n, t in found.items()}
     meta = dict(repo=str(repo), tickets=snapshot, prompt=prompt, attempts=dict(attempts),
                 session=run.name, deadline=time.time() + timeout, agent=agent,
                 notify=[sys.executable, str(SCRIPT), "_notify", str(run)])
+    if remote:
+        meta["source"] = source
     if agent == "claude":
         meta["runtime_session_id"] = str(uuid.uuid4())
     write(run / "run.json", meta)
@@ -291,7 +364,7 @@ def run_loop(args, state):
                 if outcome == "retry" and data["attempts"][number] >= args.max_attempts:
                     outcome = "blocked"
                     result["summary"] += " Automatic attempt limit reached; use retry after inspection."
-                mark(Path(meta["tickets"][number]["path"]), "ready-for-agent" if outcome == "retry" else outcome)
+                mark_ticket(meta, number, "ready-for-agent" if outcome == "retry" else outcome)
             print(f"{number or 'No ticket'}: {outcome}: {result['summary']}", flush=True)
             if outcome == "blocked":
                 # Consume this turn, retaining its live conversation for operator follow-up.
@@ -311,13 +384,18 @@ def run_loop(args, state):
         if (state / "STOP").exists():
             print("Stopped before starting another ticket. Remove STOP (or use start) to resume.")
             return 0
-        found = tickets(args.tickets)
+        found = load_tickets(args)
         if all(t["status"] == "done" for t in found.values()):
-            print("All tickets done.")
+            print("No open issues match the label filter." if not found else "All tickets done.")
             return 0
+        source = getattr(args, "source", None)
+        if source and source["tracker"] != "local" and not frontier(found):
+            print("No eligible issues: issues are blocked. Use status to inspect their dependencies.")
+            return 2
         agent = getattr(args, "agent", "codex")
         check_agent(agent)
-        run, meta = prepare(args.repo, state, args.tickets, data["attempts"], args.timeout, args.prompt, agent)
+        run, meta = prepare(args.repo, state, args.tickets, data["attempts"], args.timeout, args.prompt, agent,
+                            source=source, found=found)
         data["agent"] = agent
         data["active"] = str(run)
         write(checkpoint, data)  # A crash here never causes automatic redispatch.
@@ -418,7 +496,7 @@ def internal(argv):
                 raise ValueError("Only blocked may omit a selected ticket")
             number = None
         elif number not in read(run / "run.json")["tickets"]:
-            raise ValueError("Expected the selected ticket's two-digit number")
+            raise ValueError("Expected the selected ticket's number from the run snapshot")
         report_id = uuid.uuid4().hex
         report = dict(run=run.name, outcome=outcome, ticket=number, summary=summary, report_id=report_id)
         write(run / "reports" / (report_id + ".json"), report)
@@ -436,24 +514,152 @@ def internal(argv):
     return 0
 
 
+def argument_parser():
+    commands = {
+        "start": "Start or resume the watcher in a detached tmux session.",
+        "run": "Watch in the foreground; the agent still runs in tmux.",
+        "status": "Show issues, progress, attach commands, and log location.",
+        "stop": "Stop dispatch after the current attempt; preserve the worker.",
+        "retry": "Requeue an unfinished ticket after stopping its watcher and worker.",
+    }
+    examples = {
+        "start": """Examples:
+  ralph start --tickets .scratch/my-feature/issues
+  ralph start --tracker github
+  ralph start --tracker gitlab --project group/project
+  ralph start --tracker github --label ready-for-agent --label feature:checkout
+  ralph start --agent claude --prompt-file instructions.md
+  ralph start                          # resume the saved source and agent
+
+Starts a detached watcher and clears a previous stop request. Use status to
+find its logs or attach to an agent waiting for your input. Existing conversations
+keep their original prompt; overrides apply to future attempts.""",
+        "run": """Examples:
+  ralph run --tickets .scratch/my-feature/issues
+  ralph run --tracker github --prompt 'Implement one eligible issue.'
+  ralph run --agent pi --max-attempts 2 --timeout 3600
+
+Watches in this terminal. Ctrl-C stops the watcher and preserves the agent.
+After a previous stop request, remove <state>/STOP or use start to resume.
+Existing conversations keep their original prompt.""",
+        "status": """Examples:
+  ralph status
+  ralph status --tracker github --project owner/repo
+  ralph status --state .ralph/github
+
+Read-only: does not save a source choice or start an agent. Use the Worker attach
+command to answer a blocked agent; detach with Ctrl-b, d. Use the same --repo
+and --state as the watcher.""",
+        "stop": """Examples:
+  ralph stop
+  ralph stop --state .ralph/github
+
+Requests a graceful stop: the current attempt may finish, then no new work starts.
+If already blocked, the watcher stops and retains the interactive conversation.
+This does not kill the worker. Use start to clear the request and resume watching.
+To abandon an attempt, see ralph retry -h and docs/operations.md.""",
+        "retry": """Examples:
+  ralph retry 02                       # local ticket
+  ralph retry 123 --state .ralph/github # remote issue number, without #
+
+Stop and inspect the watcher AND its worker before retrying. The stop command
+alone does not kill either during an autonomous turn. Use status for their
+attach commands and docs/operations.md for the abandonment steps. Retry refuses
+while the worker session exists. After requeueing, use start with the same state.
+
+Resets this ticket's attempt count. For remote issues it clears ralph:blocked.
+To run again, the issue must match the saved filter and have closed blockers.""",
+    }
+    source_notes = """Source and agent:
+  start/run/retry save the issue source and filter; later commands can omit them.
+  start/run also remember the agent. Use the same --repo and --state on each call.
+  Changing the source or filter requires a separate --state directory.
+  GitHub requires authenticated gh; GitLab requires authenticated glab.
+  Remote issues need acceptance checkboxes; all blockers must be closed."""
+    parser = argparse.ArgumentParser(
+        prog="ralph", usage="%(prog)s COMMAND [OPTIONS]",
+        description="Run one issue at a time with an interactive coding agent in tmux.\n"
+                    "Supports local Markdown tickets and GitHub/GitLab issues.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  ralph start --tickets .scratch/my-feature/issues
+  ralph start --tracker github
+  ralph start --tracker gitlab --project group/project
+  ralph start --tracker github --label ready-for-agent --label feature:checkout
+  ralph start --agent claude --prompt-file instructions.md
+  ralph status                         # inspect the saved source and agent
+  ralph retry 123 --state .ralph/github # after stopping watcher and worker
+
+""" + source_notes + "\n\nUse ralph COMMAND -h for command-specific help and recovery guidance.")
+
+    def options(target, command=None):
+        # Child parsers must not replace options supplied before the command.
+        def add(group, *flags, default=None, help, visible=True, **kwargs):
+            group.add_argument(*flags, default=default if command is None else argparse.SUPPRESS,
+                               help=help if visible else argparse.SUPPRESS, **kwargs)
+
+        paths = target.add_argument_group("working directory and state")
+        add(paths, "--repo", type=Path, metavar="DIR", default=Path.cwd(),
+            help="Target working repository (default: current directory)")
+        add(paths, "--state", type=Path, metavar="DIR",
+            help="Runtime directory; use the same path on later commands (default: <repo>/.ralph)")
+
+        sources = target.add_argument_group("issue source")
+        show_source = command != "stop"
+        add(sources, "--tracker", choices=("local", "github", "gitlab"), metavar="TRACKER", visible=show_source,
+            help="Source: local, github, gitlab (default: saved source, otherwise local)")
+        add(sources, "--tickets", type=Path, metavar="DIR", visible=show_source,
+            help="Local ticket directory (default: saved directory, otherwise <repo>/issues)")
+        add(sources, "--project", metavar="REPO", visible=show_source,
+            help="Remote owner/repo, group/subgroup/project, or repository URL "
+                 "(default: saved project, otherwise inferred by gh/glab)")
+        add(sources, "--label", action="append", metavar="LABEL", visible=show_source,
+            dest="label" if command is None else "command_labels",
+            help="Remote filter; repeat to require ALL labels. Supplied labels replace the default "
+                 "(default: saved filter, otherwise ready-for-agent)")
+
+        launching = command in {None, "start", "run"}
+        agents = target.add_argument_group("agent")
+        add(agents, "--agent", choices=AGENTS, metavar="AGENT", visible=launching,
+            help="Interactive CLI: codex, claude, opencode, pi (default: saved agent, otherwise codex)")
+        instructions = target.add_argument_group("instructions")
+        prompts = instructions.add_mutually_exclusive_group()
+        add(prompts, "--prompt", metavar="TEXT", visible=launching,
+            help="Task instructions (default: built-in implementation prompt); reporting rules are appended")
+        add(prompts, "--prompt-file", type=Path, metavar="FILE", visible=launching,
+            help="Read UTF-8 task instructions from FILE instead of --prompt")
+
+        limits = target.add_argument_group("runtime limits")
+        add(limits, "--max-attempts", type=int, metavar="N", default=3, visible=launching,
+            help="Reported attempts per ticket before blocking (default: 3); assisted follow-ups do not add attempts")
+        add(limits, "--timeout", type=float, metavar="SECONDS", default=8 * 60 * 60, visible=launching,
+            help="Initial autonomous-turn deadline (default: 28800 seconds / 8 hours); timeout preserves the worker")
+
+    subparsers = parser.add_subparsers(dest="command", title="commands", metavar="COMMAND", required=True)
+    options(parser)
+    parser.set_defaults(ticket=None)
+    for command, description in commands.items():
+        child = subparsers.add_parser(
+            command, help=description, description=description,
+            usage="%(prog)s " + ("TICKET " if command == "retry" else "") + "[OPTIONS]",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=examples[command] + ("\n\n" + source_notes if command in {"start", "run"} else ""))
+        if command == "retry":
+            child.add_argument("ticket", metavar="TICKET", help="Local ticket number (02) or remote issue number (123)")
+        options(child, command)
+    return parser
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1].startswith("_"):
         return internal(sys.argv[1:])
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["start", "run", "status", "stop", "retry"])
-    parser.add_argument("ticket", nargs="?", help="Ticket number for retry")
-    parser.add_argument("--agent", choices=AGENTS, help="Interactive CLI (default: recorded agent, otherwise codex)")
-    parser.add_argument("--repo", type=Path, default=Path.cwd(), help="Target repository (default: current directory)")
-    parser.add_argument("--tickets", type=Path, help="Ticket directory (default: <repo>/issues)")
-    parser.add_argument("--state", type=Path, help="Runtime directory (default: <repo>/.ralph)")
-    prompts = parser.add_mutually_exclusive_group()
-    prompts.add_argument("--prompt", help="Task instructions; ticket context and reporting rules are appended")
-    prompts.add_argument("--prompt-file", type=Path, help="Read task instructions from a UTF-8 file")
-    parser.add_argument("--max-attempts", type=int, default=3)
-    parser.add_argument("--timeout", type=float, default=8 * 60 * 60, help="Seconds per attempt; timeout preserves the session")
+    parser = argument_parser()
     args = parser.parse_args()
+    args.label = (args.label or []) + getattr(args, "command_labels", []) or None
+    # These alternatives are mutually exclusive even across the command boundary.
+    if args.prompt is not None and args.prompt_file is not None:
+        parser.error("--prompt and --prompt-file cannot be used together")
     args.repo = args.repo.resolve()
-    args.tickets = (args.tickets or args.repo / "issues").resolve()
     state = (args.state or args.repo / ".ralph").resolve()
     if args.timeout <= 0 or args.max_attempts < 1:
         parser.error("timeout and max-attempts must be positive")
@@ -466,11 +672,35 @@ def main():
         args.prompt = DEFAULT_PROMPT
     if not args.prompt.strip():
         parser.error("prompt must not be empty")
+    if args.command == "stop":
+        write(state / "STOP", "stop after current attempt\n")
+        print("Stop requested. Current attempt may finish; no next ticket will launch.")
+        return 0
+    if args.label and any(not label.strip() or "," in label for label in args.label):
+        parser.error("each --label must be a nonempty label without commas")
+    args.source = source_config(args, state)
+    args.tickets = Path(args.source["tickets"]) if args.source["tracker"] == "local" else None
     if args.command == "status":
-        found = tickets(args.tickets)
+        source_error = None
+        try:
+            found = load_tickets(args)
+        except (ValueError, OSError) as error:
+            if args.source["tracker"] == "local":
+                raise
+            # Recovery still needs the attach commands during a service outage.
+            source_error = error
+            found = {}
+            print(f"Cannot refresh issues: {error}", file=sys.stderr)
         ready = frontier(found)
+        if args.source["tracker"] != "local":
+            print(f"Source: {args.source['tracker']} {args.source['host']}/{args.source['project']}")
         for number, ticket in found.items():
-            print(f"{number}  {ticket['status']:15} {'runnable' if number in ready else ''}  {ticket['path'].stem[3:]}")
+            title = ticket.get("title") or ticket["path"].stem[3:]
+            print(f"{number}  {ticket['status']:15} {'runnable' if number in ready else ''}  {title}")
+            if "url" in ticket:
+                print("   ", ticket["url"])
+                if ticket["dependencies"]:
+                    print("    Dependencies:", ", ".join(ticket["dependencies"]))
         if (state / "state.json").exists():
             checkpoint = read(state / "state.json")
             active = checkpoint["active"]
@@ -486,12 +716,8 @@ def main():
                 print("Agent:", checkpoint.get("agent", "codex"))
         print("Runner attach:", f"tmux -L {socket(args.repo)} attach -t loop")
         print("Logs:", state)
-        return 0
+        return 2 if source_error else 0
     state.mkdir(parents=True, exist_ok=True)
-    if args.command == "stop":
-        write(state / "STOP", "stop after current attempt\n")
-        print("Stop requested. Current attempt may finish; no next ticket will launch.")
-        return 0
     # The same repo lock applies even with alternative ticket/state directories.
     lock = args.repo / ".ralph/runner.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -500,9 +726,25 @@ def main():
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError("A Ralph runner is already active for this repository")
+        checkpoint = state / "state.json"
+        data = read(checkpoint) if checkpoint.exists() else {"active": None, "attempts": {}}
+        if (not (state / "source.json").exists() and args.source["tracker"] != "local"
+                and (data.get("active") or data.get("attempts"))):
+            raise ValueError("Existing state has no recorded issue source; use another --state for remote issues")
+        if data.get("active"):
+            active_source = read(Path(data["active"]) / "run.json").get("source", {"tracker": "local"})
+            if (active_source["tracker"] != args.source["tracker"]
+                    or (active_source["tracker"] != "local" and active_source != args.source)):
+                raise ValueError("Active run belongs to a different issue source; resume it before switching")
+        write(state / "source.json", args.source)
         if args.command == "retry":
-            number = (args.ticket or "").zfill(2)
-            found = tickets(args.tickets)
+            if not args.ticket or not re.fullmatch(r"[0-9]+", args.ticket) or int(args.ticket) < 1:
+                raise ValueError("retry requires an unfinished ticket number")
+            number = args.ticket.zfill(2) if args.source["tracker"] == "local" else str(int(args.ticket))
+            if args.source["tracker"] == "local":
+                found = load_tickets(args)
+            else:
+                found = {number: RemoteIssues(args.source, args.repo).current(number)}
             if number not in found or found[number]["status"] == "done":
                 raise ValueError("retry requires an unfinished ticket number")
             checkpoint = state / "state.json"
@@ -515,7 +757,7 @@ def main():
                     raise ValueError("Stop and inspect the active worker before retry; no overlapping launch is allowed")
                 data["active"] = None
             data["attempts"][number] = 0
-            mark(found[number]["path"], "ready-for-agent")
+            mark_ticket(dict(repo=str(args.repo), source=args.source, tickets=found), number, "ready-for-agent")
             write(checkpoint, data)
             print(f"Ticket {number} requeued. Use start to resume.")
             return 0
@@ -537,7 +779,7 @@ def main():
             (state / "STOP").unlink(missing_ok=True)
             # Start after this process releases its lock; run obtains the same lock.
             command = shlex.join([sys.executable, str(SCRIPT), "run", "--repo", str(args.repo),
-                                 "--tickets", str(args.tickets), "--state", str(state),
+                                 "--state", str(state),
                                  "--max-attempts", str(args.max_attempts), "--timeout", str(args.timeout),
                                  "--agent", args.agent, "--prompt=" + args.prompt])
             shell = "sleep 1; " + command + " >> " + shlex.quote(str(state / "loop.log")) + " 2>&1"

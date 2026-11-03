@@ -37,7 +37,7 @@ class LiveAgentTests(unittest.TestCase):
         timeout = float(os.environ.get("RALPH_LIVE_TIMEOUT", "300"))
         self.assertGreater(timeout, 0)
         root = Path(os.environ.get("RALPH_LIVE_ARTIFACTS",
-                                  str(SCRIPT.parent.parent / ".ralph/live-tests"))).resolve()
+                                  str(Path(__file__).resolve().parents[1] / ".ralph/live-tests"))).resolve()
         root.mkdir(parents=True, exist_ok=True)
         artifacts = Path(tempfile.mkdtemp(prefix=agent + "-", dir=root))
         self.repo = artifacts / "repo"

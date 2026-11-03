@@ -13,9 +13,13 @@ import subprocess
 import sys
 import time
 import uuid
+import zipfile
+from _version import VERSION
 from trackers import RemoteIssues, remote_config
 
-SCRIPT = Path(__file__).resolve()
+BUNDLED = getattr(__loader__, "archive", None)
+# __file__ points inside the zipapp; subprocesses must launch the installed file.
+SCRIPT = Path(BUNDLED or __file__).resolve()
 AGENTS = ("codex", "claude", "opencode", "pi")
 DEFAULT_PROMPT = """Follow the repository's instructions. Choose one eligible unfinished
 ticket, implement it, and run the relevant checks. Review your changes and record
@@ -51,6 +55,18 @@ def write(path, value):
 
 def read(path):
     return json.loads(path.read_text())
+
+
+def adapter_directory(run):
+    if not BUNDLED:
+        return SCRIPT.parent / "adapters"
+    directory = run / "adapters"
+    with zipfile.ZipFile(SCRIPT) as archive:
+        for name in ("bridge.mjs", "opencode.mjs", "opencode/index.js", "pi.mjs"):
+            target = directory / name
+            if not target.exists():
+                write(target, archive.read("adapters/" + name).decode("utf-8"))
+    return directory
 
 
 def tickets(folder):
@@ -451,13 +467,13 @@ def agent_command(run, meta):
                    "--settings", str(settings), "--", meta["prompt"]]
     elif agent == "opencode":
         config = json.loads(env.get("OPENCODE_CONFIG_CONTENT", "{}"))
-        plugin = (SCRIPT.parent / "adapters/opencode").as_uri()
+        plugin = (adapter_directory(run) / "opencode").as_uri()
         config["plugins"] = [*config.get("plugins", []), plugin]
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
         command = ["opencode", meta["repo"], "--standalone", "--auto", "--prompt", meta["prompt"]]
     elif agent == "pi":
         command = ["pi", "--session", str(run / "pi-session.jsonl"),
-                   "--extension", str(SCRIPT.parent / "adapters/pi.mjs"), "--", meta["prompt"]]
+                   "--extension", str(adapter_directory(run) / "pi.mjs"), "--", meta["prompt"]]
     else:
         raise ValueError(f"Unsupported agent: {agent}")
     return command, env
@@ -592,6 +608,8 @@ To run again, the issue must match the saved filter and have closed blockers."""
 
 """ + source_notes + "\n\nUse ralph COMMAND -h for command-specific help and recovery guidance.")
 
+    parser.add_argument("--version", action="version", version="%(prog)s " + VERSION)
+
     def options(target, command=None):
         # Child parsers must not replace options supplied before the command.
         def add(group, *flags, default=None, help, visible=True, **kwargs):
@@ -640,7 +658,7 @@ To run again, the issue must match the saved filter and have closed blockers."""
     parser.set_defaults(ticket=None)
     for command, description in commands.items():
         child = subparsers.add_parser(
-            command, help=description, description=description,
+            command, prog=f"ralph {command}", help=description, description=description,
             usage="%(prog)s " + ("TICKET " if command == "retry" else "") + "[OPTIONS]",
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog=examples[command] + ("\n\n" + source_notes if command in {"start", "run"} else ""))
@@ -793,7 +811,7 @@ def main():
         return run_loop(args, state)
 
 
-if __name__ == "__main__":
+def cli():
     try:
         sys.exit(main())
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
@@ -802,3 +820,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("Runner interrupted; active tmux worker preserved. Run again to watch it.")
         sys.exit(130)
+
+
+if __name__ == "__main__":
+    cli()

@@ -165,7 +165,7 @@ class AgentTests(unittest.TestCase):
         text = lambda value: [{"type": "text", "text": value}]
         self.h.report(run, "blocked")
         message = "RALPH_REPORT:" + ralph.read(run / "result.json")["report_id"]
-        payload = {"agent": agent, "adapter": str(SCRIPT.parent / f"adapters/{agent}.mjs"),
+        payload = {"agent": agent, "adapter": str(ralph.adapter_directory(run) / f"{agent}.mjs"),
                    "cwd": str(self.repo), "session": {"id": "main-session"}}
         if agent == "opencode":
             payload["session"].update(location={"directory": str(self.repo)}, outcome="succeeded")

@@ -1,0 +1,129 @@
+name: CI and release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Select build version
+        id: version
+        shell: bash
+        run: |
+          version=dev
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="$GITHUB_REF_NAME"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build executable and checksum
+        env:
+          RALPH_VERSION: ${{ steps.version.outputs.version }}
+        run: python3 scripts/build.py --version "$RALPH_VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ralph-release
+          path: |
+            dist/ralph
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep Python 3.9 on an explicitly supported runner image.
+          - os: ubuntu-24.04
+            python: '3.9'
+          - os: ubuntu-latest
+            python: '3.14'
+          - os: macos-latest
+            python: '3.14'
+    runs-on: ${{ matrix.os }}
+    env:
+      RALPH_EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install tmux (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: brew list tmux || brew install tmux
+      - uses: actions/download-artifact@v4
+        with:
+          name: ralph-release
+          path: ${{ runner.temp }}/release files
+      - name: Check release checksum
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/release files"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            shasum -a 256 -c SHA256SUMS
+          else
+            sha256sum -c SHA256SUMS
+          fi
+          chmod +x ralph
+          ./ralph --version
+          ./ralph --help
+      - name: Test source
+        env:
+          RALPH_TEST_ARTIFACT: ${{ runner.temp }}/release files/ralph
+        run: python3 -m unittest discover -s tests -v
+      - name: Test installed executable without the source checkout
+        shell: bash
+        run: |
+          isolated="$RUNNER_TEMP/installed ralph"
+          mkdir -p "$isolated"
+          cp -R tests INSTALL.agent.md "$isolated/"
+          cp "$RUNNER_TEMP/release files/ralph" "$RUNNER_TEMP/release files/SHA256SUMS" "$isolated/"
+          export RALPH_EXECUTABLE="$isolated/ralph"
+          export RALPH_TEST_ARTIFACT="$RALPH_EXECUTABLE"
+          cd "$isolated"
+          python3 -m unittest discover -s tests -v
+
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ralph-release
+          path: dist
+      - name: Publish tested release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.version }}
+        run: |
+          cd dist
+          sha256sum -c SHA256SUMS
+          gh release create "$RELEASE_TAG" ralph SHA256SUMS --verify-tag --generate-notes

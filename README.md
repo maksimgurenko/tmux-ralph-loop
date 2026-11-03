@@ -20,6 +20,11 @@ built-in implementation instructions available when no skills are installed.
 
 ## Quick start
 
+**[Install Ralph with an agent](INSTALL.agent.md)** — choose a user-wide `ralph`
+on `PATH` or a project-local `./ralph`. The guide downloads the latest stable
+release, verifies its checksum, and checks the installation without starting a loop.
+Only one executable is installed; no source checkout is needed.
+
 Requires **Python 3.9+**, **tmux**, **Git**, and your chosen authenticated agent CLI
 on `PATH`. No extra Python packages; tested on Linux and macOS.
 
@@ -30,14 +35,9 @@ See [agent setup](docs/agents.md#clear-one-time-startup-dialogs-first) for the o
 The loop cannot answer startup dialogs, and they can stall the first attempt.
 
 ```sh
-git clone https://github.com/maksimgurenko/tmux-ralph-loop.git "$HOME/tmux-ralph-loop"
 cd /path/to/your/project
 # Add .ralph/ to this project's .gitignore before starting.
-
-ralph() {
-  python3 "$HOME/tmux-ralph-loop/scripts/ralph.py" "$@"
-}
-
+ralph --version
 ralph -h
 
 # Replace my-feature with the directory generated for your local tickets.
@@ -47,9 +47,8 @@ ralph status
 tail -f .ralph/loop.log
 ```
 
-Add the `ralph` function to your shell configuration to keep it available. You can
-also invoke `python3 /path/to/tmux-ralph-loop/scripts/ralph.py` directly. Keep the
-complete checkout, including its bundled adapters.
+These examples use a user-wide installation. For a project installation, use
+`./ralph` in place of `ralph`.
 
 Run from the target repository, or pass `--repo /path/to/project`. The agent uses
 its existing authentication and model settings. It commits completed work on the
@@ -231,6 +230,26 @@ Run from this tool’s checkout. Integration tests use real tmux with simulated
 agents; OpenCode/Pi adapter tests also need Node.js. No model API calls.
 Tracker tests use simulated `gh`/`glab` services, including dependent issues,
 remote completion checks, and recovery after a failed close. They do not modify real issues.
+
+Build the portable [Python zip archive](https://docs.python.org/3.9/library/zipapp.html)
+with the standard library:
+
+```sh
+python3 scripts/build.py --version v1.2.3
+dist/ralph --version
+RALPH_EXECUTABLE="$PWD/dist/ralph" RALPH_EXPECTED_VERSION=v1.2.3 python3 -m unittest discover -s tests -v
+```
+
+The build writes `dist/ralph` and `dist/SHA256SUMS`; generated files are ignored by
+Git. Omitting `--version` builds `dev`. Source execution remains available as
+`python3 scripts/ralph.py` and reports `dev`; keep the complete checkout for that mode.
+Published builds report their release tag. OpenCode/Pi adapters are included in the
+executable and extracted under each run's state directory when loaded.
+
+CI builds once and tests that artifact alongside the source on Linux with Python
+3.9/3.14 and macOS with Python 3.14. Pushing a `vX.Y.Z` tag publishes `ralph` and
+`SHA256SUMS` only after all checks pass, using
+[generated release notes](https://cli.github.com/manual/gh_release_create).
 
 To test your **installed, authenticated agents against real models**, opt in:
 

@@ -2,7 +2,8 @@
 
 Use the same `--repo` and `--state` values on every command. The issue source and
 ticket directory are remembered after `start`, `run`, or `retry`. The
-examples below assume the `ralph` shell function in the README and default state.
+examples below assume a user-wide `ralph` installation and default state. For a
+project installation, use `./ralph` instead.
 
 ## Configuration
 

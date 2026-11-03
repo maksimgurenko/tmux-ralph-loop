@@ -1,4 +1,4 @@
-import importlib.util
+import importlib
 import fcntl
 import json
 import os
@@ -13,16 +13,15 @@ import contextlib
 import io
 from unittest.mock import patch
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts/ralph.py"
-sys.path.insert(0, str(SCRIPT.parent))
-spec = importlib.util.spec_from_file_location("ralph", SCRIPT)
-ralph = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(ralph)
+SOURCE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts/ralph.py"
+SCRIPT = Path(os.environ.get("RALPH_EXECUTABLE", SOURCE_SCRIPT)).resolve()
+sys.path.insert(0, str(SCRIPT if "RALPH_EXECUTABLE" in os.environ else SCRIPT.parent))
+ralph = importlib.import_module("ralph")
 
 
 class RalphTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="ralph-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="ralph test ")
         self.addCleanup(self.temp.cleanup)
         # The runner resolves --repo, and the tmux socket name hashes that path.
         # Keep the same spelling here or macOS's /var -> /private/var symlink puts

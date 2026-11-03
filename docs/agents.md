@@ -5,9 +5,11 @@ then select it with `--agent`. Only the selected CLI needs to be installed. Ever
 agent runs in an interactive tmux terminal: attach using `status`, answer questions,
 and detach while it continues. The loop does not use print, headless, or RPC modes.
 
-Keep the complete tool checkout: OpenCode and Pi load the bundled JavaScript adapters
-from `scripts/adapters/`. They use their runtime's built-in Node-compatible APIs;
-there is no additional package installation for the loop.
+The release executable includes the OpenCode and Pi JavaScript adapters and
+extracts them into `<state>/runs/<run-id>/adapters/` when loaded. Source execution
+loads them from `scripts/adapters/` and requires the complete checkout. They use
+their runtime's built-in Node-compatible APIs; there is no additional package
+installation for the loop.
 
 ## Clear one-time startup dialogs first
 

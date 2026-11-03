@@ -16,6 +16,17 @@ class CliTests(unittest.TestCase):
         self.h.setUp()
         self.addCleanup(self.h.doCleanups)
 
+    def test_version_exits_without_accessing_a_tracker_or_starting_work(self):
+        output = io.StringIO()
+        with patch.object(sys, "argv", [str(test_ralph.SCRIPT), "--version"]), \
+                contextlib.redirect_stdout(output), patch.object(ralph, "source_config") as source, \
+                self.assertRaises(SystemExit) as error:
+            ralph.main()
+        self.assertEqual(error.exception.code, 0)
+        self.assertEqual(output.getvalue().strip(), "ralph " + ralph.VERSION)
+        source.assert_not_called()
+        self.assertFalse(self.h.state.exists())
+
     def test_options_before_and_after_command_keep_values_and_defaults(self):
         parser = ralph.argument_parser()
         prefix = ["--repo", str(self.h.repo), "--state", str(self.h.state), "--agent", "claude",

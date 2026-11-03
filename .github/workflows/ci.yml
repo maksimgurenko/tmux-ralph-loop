@@ -48,7 +48,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Keep Python 3.9 on an explicitly supported runner image.
+          - os: ubuntu-24.04
             python: '3.9'
           - os: ubuntu-latest
             python: '3.14'

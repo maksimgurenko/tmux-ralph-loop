@@ -251,6 +251,10 @@ CI builds once and tests that artifact alongside the source on Linux with Python
 `SHA256SUMS` only after all checks pass, using
 [generated release notes](https://cli.github.com/manual/gh_release_create).
 
+Wait for the `publish` job to finish before downloading. If a release page already
+exists, publishing attaches the checked files to it and keeps its title and notes.
+Re-running publishing replaces the two managed assets.
+
 To test your **installed, authenticated agents against real models**, opt in:
 
 ```sh

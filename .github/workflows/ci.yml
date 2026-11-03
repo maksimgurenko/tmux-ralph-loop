@@ -100,7 +100,7 @@ jobs:
         run: |
           isolated="$RUNNER_TEMP/installed ralph"
           mkdir -p "$isolated"
-          cp -R tests INSTALL.agent.md "$isolated/"
+          cp -R tests INSTALL.agent.md .github "$isolated/"
           cp "$RUNNER_TEMP/release files/ralph" "$RUNNER_TEMP/release files/SHA256SUMS" "$isolated/"
           export RALPH_EXECUTABLE="$isolated/ralph"
           export RALPH_TEST_ARTIFACT="$RALPH_EXECUTABLE"
@@ -126,4 +126,8 @@ jobs:
         run: |
           cd dist
           sha256sum -c SHA256SUMS
-          gh release create "$RELEASE_TAG" ralph SHA256SUMS --verify-tag --generate-notes
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" ralph SHA256SUMS --clobber
+          else
+            gh release create "$RELEASE_TAG" ralph SHA256SUMS --verify-tag --generate-notes
+          fi

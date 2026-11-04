@@ -1,77 +1,55 @@
 # tmux-ralph-loop
 
 Run **local Markdown tickets, GitHub issues, or GitLab issues** one at a time with
-**Codex, Claude Code, OpenCode, or Pi** in tmux. Each attempt gets a fresh agent
-session; the loop continues until the work is done or your input is needed.
-
-**Blocked agents keep their conversation.** Attach to the session, answer the
-agent, and let it continue. Restart the watcher after an interruption to keep
-watching the same worker.
-
-Built for [Matt Pocock’s skill workflow](#from-idea-to-implementation), with
-built-in implementation instructions available when no skills are installed.
+**Codex, Claude Code, OpenCode, or Pi**. The loop starts a fresh agent session for
+each attempt and continues until the work is done or your input is needed.
 
 ## Why use it?
 
-- **Fresh context:** each new attempt starts a new agent; the agent chooses an eligible ticket.
-- **Resume after interruptions:** restart the watcher without launching duplicate work.
-- **Inspect progress:** keep prompts, terminal logs, reports, and runtime events on disk.
-- **Keep dependencies in order:** completed blockers and unchanged, checked acceptance criteria gate progress.
+- **Fresh context:** each new attempt starts a new agent, which chooses an eligible ticket.
+- **Resume interruptions:** restart the watcher without launching duplicate work.
+- **Inspect progress:** prompts, terminal logs, reports, and runtime events stay on disk.
+- **Respect dependencies:** completed blockers and unchanged, checked acceptance criteria gate progress.
+
+## Why tmux?
+
+tmux lets agents use their native interactive CLI. Attach to answer a question,
+then detach while the agent continues. Blocked agents keep the same conversation.
+The watcher runs independently: stopping or interrupting it preserves the worker,
+and restarting it resumes watching that worker.
 
 ## Quick start
 
-**[Install Ralph with an agent](INSTALL.agent.md)** — choose a user-wide `ralph`
-on `PATH` or a project-local `./ralph`. The guide downloads the latest stable
-release, verifies its checksum, and checks the installation without starting a loop.
-Only one executable is installed; no source checkout is needed.
+**[Install Ralph with an agent](INSTALL.agent.md)** as a user-wide `ralph` on `PATH`
+or a project-local `./ralph`. The guide downloads one executable from the latest
+stable release and verifies its checksum; no source checkout is needed.
 
-Requires **Python 3.9+**, **tmux**, **Git**, and your chosen authenticated agent CLI
-on `PATH`. No extra Python packages; tested on Linux and macOS.
+Requires **Python 3.9+**, **tmux**, **Git**, and an authenticated agent CLI on `PATH`.
+No extra Python packages; tested on Linux and macOS. The agent uses its existing
+model and authentication settings.
 
-Before starting the loop, run your chosen agent by hand **from the target project**
-with the loop's permission flags and accept its startup dialogs. For Codex, use
-`codex --yolo --no-alt-screen`; for Claude, use `claude --dangerously-skip-permissions`.
-See [agent setup](docs/agents.md#clear-one-time-startup-dialogs-first) for the other CLIs.
-The loop cannot answer startup dialogs, and they can stall the first attempt.
+Before starting, run the agent by hand **from the target project**, accept its
+startup dialogs, then exit. Use `codex --yolo --no-alt-screen` for Codex or
+`claude --dangerously-skip-permissions` for Claude. The loop cannot answer these
+dialogs. See [agent setup](docs/agents.md#clear-one-time-startup-dialogs-first)
+for the other CLIs and permission details.
 
 ```sh
 cd /path/to/your/project
 # Add .ralph/ to this project's .gitignore before starting.
-ralph --version
-ralph -h
-
-# Replace my-feature with the directory generated for your local tickets.
-ralph status --tickets "$PWD/.scratch/my-feature/issues"
+# Replace my-feature with your local ticket directory.
 ralph start --tickets "$PWD/.scratch/my-feature/issues"
 ralph status
 tail -f .ralph/loop.log
 ```
 
-These examples use a user-wide installation. For a project installation, use
-`./ralph` in place of `ralph`.
-
-Run from the target repository, or pass `--repo /path/to/project`. The agent uses
-its existing authentication and model settings. It commits completed work on the
-current branch while preserving unrelated changes. Prepare tickets in the
-[local format](#ticket-format), or choose a remote source below.
-
-## CLI help
-
-```sh
-ralph -h           # commands, grouped options, defaults, and examples
-ralph start -h     # detached startup and saved settings
-ralph run -h       # foreground watching and limits
-ralph status -h    # progress and attach commands
-ralph stop -h      # graceful stopping
-ralph retry -h     # abandoning and requeueing an attempt
-```
-
-Options work before or after the command: `ralph --repo /path/to/project status`
-and `ralph status --repo /path/to/project` are equivalent.
+Use `./ralph` for a project installation. Run from the target repository or pass
+`--repo /path/to/project`. The agent commits completed work on the current branch
+while preserving unrelated changes. Prepare tickets in the [local format](#ticket-format),
+or choose a remote source below. Use `ralph -h` or command help such as
+`ralph start -h` for options and defaults.
 
 ## Choose an issue source
-
-Choose one source for each state directory:
 
 | Source | Start command | Requires |
 | --- | --- | --- |
@@ -79,205 +57,157 @@ Choose one source for each state directory:
 | GitHub | `ralph start --tracker github` | Authenticated `gh` (`gh auth login`) |
 | GitLab | `ralph start --tracker gitlab` | Authenticated `glab` (`glab auth login`) |
 
-The repository is inferred by `gh`/`glab` from the target checkout. Override it
-with `--project owner/repo` (GitHub), `--project group/subgroup/project` (GitLab),
-or a full repository URL for a self-hosted instance.
+`gh`/`glab` infer the repository from the checkout. Override it with
+`--project owner/repo`, `--project group/subgroup/project`, or a full repository
+URL for a self-hosted instance.
 
-Only open issues labelled `ready-for-agent` are included by default. To select
-a specific feature, pass every required label:
+Remote sources include only open issues labelled `ready-for-agent` by default.
+`--label` replaces that filter; repeated labels must **all** match:
 
 ```sh
 ralph start --tracker github --label ready-for-agent --label feature:checkout
 ```
 
-`--label` replaces the default filter; repeated labels must **all** match. Every
-eligible issue needs acceptance checkboxes in its body. The agent chooses one
-eligible issue per attempt, using its actual issue number, such as `123`.
+Issues need acceptance checkboxes. All blockers must be closed, including those
+outside the filter or in another project on the same host. See
+[remote issue formats and dependencies](docs/operations.md#remote-issues).
 
-The loop checks native blocking relationships and explicit `Blocked by` fields.
-All blockers must be closed, including blockers outside the label filter or in
-another project on the same host. See [remote issue details](docs/operations.md#remote-issues).
-
-The agent updates checkboxes and evidence in the remote issue body and commits
-its code changes. After a matching report and turn-end event, the runner checks
-the original criteria and closes the issue. Blocked attempts use a `ralph:blocked`
-label and keep their interactive session. `ralph retry 123` clears that label
-after you stop the watcher and worker.
-
-`start`, `run`, and `retry` remember the tracker, project, ticket directory, and
-label filter. Later `status`, `start`, and `retry` commands can omit them. To
-choose a different source or filter, use a separate `--state` directory; use that
-same directory for subsequent commands. `status` only reads and does not save a choice.
-
-For example, keep a GitHub run separate from existing local state:
-
-```sh
-ralph start --tracker github --state .ralph/github
-ralph status --state .ralph/github
-# Later, after the watcher stops, resume with the saved source and agent:
-ralph start --state .ralph/github
-```
+`start`, `run`, and `retry` save the source, project, ticket directory, and label
+filter; `status` only reads them. Later commands can omit the saved options.
+To change the source or filter, finish or stop the current worker and use a
+separate `--state`, such as `.ralph/github`. Keep the same `--repo` and `--state`
+for subsequent commands.
 
 ## Choose an agent
 
-Codex is the default. Select another CLI with `--agent`:
+Codex is the default. Add `--agent` to select another CLI:
 
-| Agent | Start command |
-| --- | --- |
-| [Codex](https://developers.openai.com/codex/cli/) | `ralph start --agent codex` |
-| [Claude Code](https://code.claude.com/docs/en/overview) | `ralph start --agent claude` |
-| [OpenCode](https://opencode.ai/v2/docs/) (2.x only) | `ralph start --agent opencode` |
-| [Pi](https://pi.dev/docs/latest/quickstart) (0.87.0+) | `ralph start --agent pi` |
+| Agent | Option | Required version |
+| --- | --- | --- |
+| [Codex](https://developers.openai.com/codex/cli/) | `--agent codex` | — |
+| [Claude Code](https://code.claude.com/docs/en/overview) | `--agent claude` | — |
+| [OpenCode](https://opencode.ai/v2/docs/) | `--agent opencode` | 2.x only |
+| [Pi](https://pi.dev/docs/latest/quickstart) | `--agent pi` | 0.87.0+ |
 
-Each uses its native interactive interface and completion hooks. The selected
-agent is remembered across restarts; active runs cannot switch agents.
-
-The loop uses Codex’s `--yolo`, Claude’s `--dangerously-skip-permissions`, and
-OpenCode’s `--auto`; Pi uses its normal tool permissions. See
-[agent setup, permissions, and compatibility](docs/agents.md).
+The chosen agent is remembered across restarts; active runs cannot switch agents.
+Codex uses `--yolo`, Claude uses `--dangerously-skip-permissions`, and OpenCode uses
+`--auto`; Pi keeps its normal tool permissions. See
+[agent compatibility and permissions](docs/agents.md).
 
 ## Connect, stop, and resume
 
-`ralph status` prints the exact **Worker attach** command. Run it to connect to the
-agent, answer its questions or complete a setup dialog, then detach with **Ctrl-b, d**.
-A blocked agent keeps its conversation; the loop waits for a fresh completion report.
+Copy the **Worker attach** command from `ralph status`, answer the agent, then
+detach with **Ctrl-b, d**. A blocked conversation can continue with a fresh report.
 
 | Command | Effect |
 | --- | --- |
-| `ralph start` | Start or resume a detached watcher and clear a previous stop request. |
+| `ralph start` | Start or resume a detached watcher; clear a previous stop request. |
 | `ralph run` | Watch in the foreground; the agent still runs in tmux. |
-| `ralph status` | Show tickets, active session, attach command, and log location. |
-| `ralph stop` | Request a stop after the current attempt. If already blocked, stop watching and retain the agent. |
-| `ralph retry TICKET` | Requeue an unfinished local ticket or remote issue and reset its attempt count. Requires stopping the watcher and worker first. |
+| `ralph status` | Show progress, attach commands, and log location. |
+| `ralph stop` | Stop after the current attempt; if already blocked, stop watching and retain the agent. |
+| `ralph retry TICKET` | Requeue an unfinished ticket or issue and reset its attempt count. |
 
-**`stop` does not kill the worker.** Ctrl-C in the watcher also preserves it.
-Use `start` to resume watching. Before `retry`, inspect and stop the watcher and
-worker using the [abandonment steps](docs/operations.md#abandoning-an-attempt).
-Timeouts and lost workers stop dispatch without launching a replacement.
+**Stopping the watcher, including with Ctrl-C, does not kill the worker.** Use
+`start` to resume watching. Timeouts and lost workers stop dispatch without
+launching a replacement. Before `retry`, inspect the attempt and stop both watcher
+and worker using the [abandonment steps](docs/operations.md#abandoning-an-attempt).
+Remote issues use their actual number, such as `ralph retry 123`; retry clears
+`ralph:blocked`, the label applied to blocked attempts.
 
 ## Customize
 
-Without a prompt override, built-in instructions cover selection, implementation,
-checks, and review; no skill installation is required. Customize task instructions
-with **one** of:
+The default prompt covers selection, implementation, checks, and review without
+installed skills. To replace its task instructions, choose **one** override:
 
 ```sh
 ralph start --prompt 'Implement one eligible ticket. Run the integration checks.'
 ralph start --prompt-file /path/to/instructions.md
 ```
 
-The loop appends ticket context and reporting rules. Prompt text is literal, and
-files are read once at startup. Resumed conversations keep their original prompt;
-repeat a custom override when restarting to use it for future attempts.
+The loop appends ticket context and reporting rules. Prompt text is literal;
+files are read once at startup. Resumed conversations keep their original prompt.
+Repeat an override on restart to apply it to future attempts.
 
-Limit automatic attempts or the initial autonomous turn:
+Defaults are **3 reported attempts per ticket** and an **8-hour initial autonomous
+turn (28800 seconds)**. Override them with:
 
 ```sh
 ralph run --max-attempts 2 --timeout 3600
 ```
 
-Defaults are **3 reported attempts per ticket** and **28800 seconds (8 hours)**
-for the initial autonomous turn. Assisted follow-ups do not add attempts. Once a
-blocked report is accepted, the conversation can wait for your input indefinitely.
-Timeouts preserve the worker. See [all configuration defaults](docs/operations.md#configuration).
+Assisted follow-ups do not add attempts. Once a blocked report is accepted, the
+conversation can wait indefinitely for input. See [configuration](docs/operations.md#configuration).
 
 ## From idea to implementation
 
-For [Matt Pocock’s skill workflow](https://github.com/mattpocock/skills), install
-the skills for your chosen agent and run
+Install [Matt Pocock’s skills](https://github.com/mattpocock/skills) for your chosen
+agent, then run
 [`setup-matt-pocock-skills`](https://github.com/mattpocock/skills/blob/main/skills/engineering/setup-matt-pocock-skills/SKILL.md)
 in the target project. Choose local Markdown, GitHub, or GitLab to match the loop.
 
-1. Use [`wayfinder`](https://github.com/mattpocock/skills/blob/main/skills/engineering/wayfinder/SKILL.md)
-   to work through the decisions until the path is clear.
-2. Use [`to-spec`](https://github.com/mattpocock/skills/blob/main/skills/engineering/to-spec/SKILL.md)
-   to turn those decisions into a specification.
-3. Use [`to-tickets`](https://github.com/mattpocock/skills/blob/main/skills/engineering/to-tickets/SKILL.md)
-   to create issues with blocking dependencies in your chosen tracker.
-4. Start the loop with the
-   [`implement`](https://github.com/mattpocock/skills/blob/main/skills/engineering/implement/SKILL.md) skill:
+1. [`wayfinder`](https://github.com/mattpocock/skills/blob/main/skills/engineering/wayfinder/SKILL.md): work through the decisions.
+2. [`to-spec`](https://github.com/mattpocock/skills/blob/main/skills/engineering/to-spec/SKILL.md): turn them into a specification.
+3. [`to-tickets`](https://github.com/mattpocock/skills/blob/main/skills/engineering/to-tickets/SKILL.md): create tickets and blocking dependencies.
+4. [`implement`](https://github.com/mattpocock/skills/blob/main/skills/engineering/implement/SKILL.md): implement one eligible ticket per attempt.
+
+Start the loop, adding your source options on the first start:
 
 ```sh
 ralph start --prompt 'Use the implement skill to implement one eligible ticket.'
 ```
 
-Add your source options on the first start. The loop handles the repeated
-implementation sessions; you can attach whenever an agent needs your input.
-
 ## Ticket format
 
 Use one `NN-slug.md` file per local ticket, with `**Status:**`, `**Blocked by:**`,
-and acceptance checkboxes. See the [two example tickets](examples/issues).
-Dependencies must link to earlier ticket numbers. Only `ready-for-agent` tickets
-with completed blockers are eligible.
+and acceptance checkboxes. Dependencies must link to earlier ticket numbers.
+Only `ready-for-agent` tickets with completed blockers are eligible. See the
+[example tickets](examples/issues).
 
-For remote issues, put acceptance checkboxes in the issue body and use native
-dependencies or an explicit `Blocked by` field. See the
-[supported remote formats](docs/operations.md#remote-issues).
+Remote issues need acceptance checkboxes and native dependencies or an explicit
+`Blocked by` field. The agent updates checkboxes and evidence in the issue body;
+the runner manages issue state and the `ralph:blocked` label.
 
 Completion requires a fresh report, its matching turn-end event, and the original
-criteria checked without changes to their text. The runner updates local status
-or closes the remote issue after accepting that evidence. It does not rerun the
-tests or independently verify correctness.
+acceptance criteria checked without changes to their text. The runner then updates
+local status or closes the remote issue. **It does not rerun tests or independently
+verify correctness.**
 
-## Tests and license
+## Development
+
+### Tests
+
+Run from the source checkout:
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-Run from this tool’s checkout. Integration tests use real tmux with simulated
-agents; OpenCode/Pi adapter tests also need Node.js. No model API calls.
-Tracker tests use simulated `gh`/`glab` services, including dependent issues,
-remote completion checks, and recovery after a failed close. They do not modify real issues.
+Tests use real tmux with simulated agents and trackers, without model API calls
+or changes to real issues. OpenCode/Pi adapter tests also need Node.js.
 
-Build the portable [Python zip archive](https://docs.python.org/3.9/library/zipapp.html)
-with the standard library:
-
-```sh
-python3 scripts/build.py --version v1.2.3
-dist/ralph --version
-RALPH_EXECUTABLE="$PWD/dist/ralph" RALPH_EXPECTED_VERSION=v1.2.3 python3 -m unittest discover -s tests -v
-```
-
-The build writes `dist/ralph` and `dist/SHA256SUMS`; generated files are ignored by
-Git. Omitting `--version` builds `dev`. Source execution remains available as
-`python3 scripts/ralph.py` and reports `dev`; keep the complete checkout for that mode.
-Published builds report their release tag. OpenCode/Pi adapters are included in the
-executable and extracted under each run's state directory when loaded.
-
-CI builds once and tests that artifact alongside the source on Linux with Python
-3.9/3.14 and macOS with Python 3.14. Pushing a `vX.Y.Z` tag publishes `ralph` and
-`SHA256SUMS` only after all checks pass, using
-[generated release notes](https://cli.github.com/manual/gh_release_create).
-
-Wait for the `publish` job to finish before downloading. If a release page already
-exists, publishing attaches the checked files to it and keeps its title and notes.
-Re-running publishing replaces the two managed assets.
-
-To test your **installed, authenticated agents against real models**, opt in:
+Live tests require all four installed, authenticated CLIs and use their configured
+models, **consuming model usage**. They are skipped unless you opt in:
 
 ```sh
 RALPH_LIVE_TESTS=1 python3 -m unittest discover -s tests -p test_live_agents.py -v
-# Or just one agent:
-RALPH_LIVE_TESTS=1 python3 tests/test_live_agents.py LiveAgentTests.test_pi -v
 ```
 
-The live tests run all four CLIs sequentially using their existing configuration
-and authentication, consuming model usage. Each gets a fresh local Git repository
-with two dependent tasks from `tests/fixtures/live/issues`: write `hello` to a file,
-then calculate `1 + 2`. They verify exact file contents and committed outputs,
-live watcher/worker tmux sessions, fresh conversations, native completion callbacks,
-and both tickets reaching `done` without retries. They do not require installed skills.
+Missing CLIs, authentication or startup errors, blocked reports, and timeouts fail
+the opted-in tests. Artifacts remain in `.ralph/live-tests/`; see the
+[live-test harness](tests/test_live_agents.py) for individual-agent tests and settings.
 
-Each test has a dedicated tmux socket, cleaned up on success or failure. Repositories,
-prompts, logs, pane observations, and reports remain in `.ralph/live-tests/` for
-inspection, including text captures of the final panes. The harness accepts
-Claude's and Codex's recognized workspace-trust dialogs only for its generated fixture repo.
-Set `RALPH_LIVE_ARTIFACTS`
-to change the output directory or `RALPH_LIVE_TIMEOUT` to change the per-task timeout
-(default 300 seconds). Missing CLIs, other setup dialogs, authentication errors,
-blocked reports, and timeouts fail the opted-in tests rather than skip an agent.
-These tests are skipped by the ordinary test command.
+### Build and release
+
+```sh
+python3 scripts/build.py --version v1.2.3
+```
+
+The [builder](scripts/build.py) writes `dist/ralph` and `dist/SHA256SUMS` using the
+standard library; omit `--version` for `dev`. Source execution with
+`python3 scripts/ralph.py` requires the complete checkout.
+
+The [CI workflow](.github/workflows/ci.yml) tests source and built executable on
+Linux and macOS. A `vX.Y.Z` tag publishes `ralph` and `SHA256SUMS` after checks pass.
+Wait for its `publish` job before downloading.
 
 [MIT licensed](LICENSE).
